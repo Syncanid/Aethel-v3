@@ -14,8 +14,6 @@ from core.io.adapters.console import ConsoleAdapter
 from core.io.event_bus import EventBus
 # --- 认知内核层 ---
 from core.kernel.agent import AutonomousAgent
-# --- 管理控制台层 ---
-from core.server.app import WebServer
 
 # from core.io.adapters.websocket import OneBotAdapter # (预留：后续对接 OneBot)
 
@@ -69,11 +67,7 @@ class AethelSystem:
         # Agent 内部会自动初始化 ToolManager, Hippocampus, Scheduler
         self.agent = AutonomousAgent(self.config, self.bus, self.db)
 
-        # 6. 初始化 WebUI 服务
-        # 即使配置未启用，也可以初始化，start 时决定是否运行
-        self.web_server = WebServer(self.config, self.bus, self.agent)
-
-        # 7. 加载适配器 (感官)
+        # 6. 加载适配器 (感官)
         # 控制台适配器 (始终启用)
         console_adapter = ConsoleAdapter(self.bus)
         self.adapters.append(console_adapter)
@@ -92,12 +86,7 @@ class AethelSystem:
         agent_task = asyncio.create_task(self.agent.run_autonomous_loop(), name="Agent-Core")
         self.tasks.append(agent_task)
 
-        # 2. 启动 WebUI 服务
-        # 这里默认启动，或者你可以从 config 读取是否启动
-        web_task = asyncio.create_task(self.web_server.run(), name="WebUI-Server")
-        self.tasks.append(web_task)
-
-        # 3. 启动适配器
+        # 2. 启动适配器
         for adapter in self.adapters:
             t = asyncio.create_task(adapter.run(), name=f"Adapter-{adapter.platform_name}")
             self.tasks.append(t)

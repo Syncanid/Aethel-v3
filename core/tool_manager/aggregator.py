@@ -36,15 +36,26 @@ class ToolManager:
             "api_client": api_client,
             "database": database,
             "agent_state": agent_state,
-            "scheduler": None
+            "scheduler": None,
+            "tool_manager": self,
+            "agent": None
         }
 
         self.scheduler = None
+        self.agent = None
 
     def set_scheduler(self, scheduler):
-        """后续注入调度器"""
+        """注入调度器"""
         self.scheduler = scheduler
         self._dependency_map["scheduler"] = scheduler
+
+    def set_agent(self, agent):
+        """注入 Agent 实例，赋予工具自我修改的能力"""
+        self.agent = agent
+        self._dependency_map["agent"] = agent
+
+        # 同时更新引用，确保工具拿到的是最新的 scratchpad
+        self._dependency_map["agent_state"] = agent.scratchpad
 
     async def initialize(self):
         """初始化：加载本地工具 + 连接 MCP"""

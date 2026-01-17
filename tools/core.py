@@ -1,9 +1,22 @@
 # tools/core.py
-import json
-from typing import Dict, Any
+import asyncio
+import datetime
+import io
+import json  # 确保导入 json
+import logging
+import sys
+import traceback
+from typing import Dict, Any, Optional, List
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from dateutil import parser
 
 from core.io.event_bus import EventBus
+from core.io.event_schema import OneBotEvent, EventType, EventSource, Action
+from core.kernel.agent import AutonomousAgent
 from core.tool_manager.registry import register
+
+logger = logging.getLogger(__name__)
 
 
 @register()
@@ -39,7 +52,7 @@ async def update_scratchpad(
 @register()
 async def send_message(
         message: str,
-        event_bus: EventBus  # 依赖注入
+        event_bus: EventBus
 ) -> str:
     """
     向用户或控制台发送文本消息。
@@ -53,23 +66,6 @@ async def send_message(
         params={"message": message}
     ))
     return "消息已外发。"
-
-
-import asyncio
-import logging
-import sys
-import io
-import datetime
-import traceback
-from dateutil import parser
-from typing import Dict, Any, Optional
-
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from core.tool_manager.registry import register
-from core.io.event_bus import EventBus
-from core.io.event_schema import OneBotEvent, EventType, EventSource, Action
-
-logger = logging.getLogger(__name__)
 
 
 # --- 内部辅助函数：发送唤醒事件 ---
@@ -93,8 +89,9 @@ async def wait(
         duration: Optional[float] = None,
         until: Optional[str] = None,
         reason: str = "Timer expired",
-        scheduler: AsyncIOScheduler = None,  # 注入
-        event_bus: EventBus = None  # 注入
+        scheduler: AsyncIOScheduler = None,
+        event_bus: EventBus = None,
+        agent: AutonomousAgent = None,
 ) -> str:
     """
     让系统进入等待/挂起状态。
@@ -106,7 +103,6 @@ async def wait(
         until: 等待直到具体的日期时间 (绝对时间)。支持 ISO 格式 (如 '2026-01-20 08:00:00')。
         reason: 唤醒时的提示信息。
     """
-    run_date = None
 
     # 1. 计算触发时间
     if until:
@@ -136,6 +132,7 @@ async def wait(
             args=[event_bus, reason]
         )
         timestamp_str = run_date.strftime("%Y-%m-%d %H:%M:%S")
+        agent.is_sleeping = True
         return f"已进入休眠模式。系统将在 {timestamp_str} 唤醒，原因: {reason}。"
     else:
         return "系统错误: 调度器未初始化。"
@@ -146,8 +143,10 @@ async def wait(
 class AethelInterface:
     """注入到 Python 脚本中的 API 对象"""
 
-    def __init__(self, event_bus: EventBus):
+    def __init__(self, event_bus: EventBus, tool_manager: Any = None, agent_state: Dict[str, Any] = None):
         self._bus = event_bus
+        self._tool_manager = tool_manager
+        self._agent_state = agent_state
 
     def print(self, *args):
         """模拟 print"""
@@ -181,22 +180,40 @@ class AethelInterface:
         )
         self._bus.publish_action(action)
 
+    def get_available_tools(self) -> List[Dict[str, Any]]:
+        """获取当前系统已加载的真实工具列表"""
+        if self._tool_manager:
+            # 返回 schema 列表（通常包含 name, description）
+            return self._tool_manager.get_tool_schemas()
+        return [{"error": "ToolManager not available"}]
+
+    def get_system_status(self) -> Dict[str, Any]:
+        """获取真实的系统状态快照"""
+        status = {
+            "timestamp": datetime.datetime.now().isoformat(),
+            "agent_state": self._agent_state if self._agent_state else "Unknown",
+            "components": {
+                "event_bus": "active",
+                "tool_manager": "active" if self._tool_manager else "inactive"
+            }
+        }
+        return status
+
 
 @register()
 async def python_interpreter(
         code: str,
-        event_bus: EventBus  # 注入
+        event_bus: EventBus,
+        tool_manager: Any = None,
+        agent_state: Dict[str, Any] = None
 ) -> str:
     """
     [Code] 执行一段 Python 脚本。
-    该环境具有高权限，可以通过 `api` 对象直接与系统事件总线交互。
+    该环境具有高权限，可以通过 `api` 对象直接与系统系统交互。
 
     警告：
-    1. 不要使用此工具来单纯打印文本或列表，如果要回复用户，请直接使用 `send_message`。
-    2. 仅在需要计算、逻辑处理或操作 `api` 时使用。
-
-    可用对象:
-    - api: AethelInterface 实例
+    1. 【严禁模拟】绝对禁止编写代码来"手动定义"工具列表或系统状态字典（如 `tools = [...]`）。如果你需要这些信息，必须调用 `api.get_available_tools()` 或 `api.get_system_status()` 来动态获取真实数据。
+    2. 不要使用此工具来单纯打印文本，如果要回复用户，请使用 `send_message`。
 
     Args:
         code: 要执行的 Python 代码字符串。
@@ -204,14 +221,15 @@ async def python_interpreter(
 
     # 1. 准备沙箱环境
     output_capture = io.StringIO()
-    interface = AethelInterface(event_bus)
+    # 将依赖传入接口
+    interface = AethelInterface(event_bus, tool_manager, agent_state)
 
     sandbox_globals = {
         "__builtins__": __builtins__,  # 允许基础内置函数
         "api": interface,
         "datetime": datetime,
         "asyncio": asyncio,
-        "json": __import__("json"),
+        "json": json,
         "math": __import__("math")
     }
 

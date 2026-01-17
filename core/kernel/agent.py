@@ -5,6 +5,8 @@ import time
 import traceback
 from typing import List, Dict, Any
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
 from core.infrastructure.api_client import GenericAPIClient
 from core.infrastructure.config_loader import Config
 from core.infrastructure.database import Database
@@ -31,6 +33,12 @@ class AutonomousAgent:
         self.hippocampus = Hippocampus(config, self.api_client, database)
         self.vector_store = VectorStore(database, self.api_client)
 
+        # 初始化任务调度器
+        self.scheduler = AsyncIOScheduler()
+
+        # 眠状态标记
+        self.is_sleeping = False
+
         # --- 内部状态 ---
         self.history: List[Dict[str, Any]] = []
         self.scratchpad: Dict[str, Any] = {
@@ -48,6 +56,10 @@ class AutonomousAgent:
             agent_state=self.scratchpad
         )
 
+        # 注入 Scheduler 和 Agent 自身
+        self.tool_manager.set_scheduler(self.scheduler)
+        self.tool_manager.set_agent(self)
+
         # 消息缓冲区 (处理中断)
         self.incoming_events: asyncio.Queue = asyncio.Queue()
         self.event_bus.subscribe_event(self._enqueue_event)
@@ -62,6 +74,10 @@ class AutonomousAgent:
         不需要用户先说话，系统启动即开始思考。
         """
         logger.info("Agent 核心循环已启动...")
+
+        # 启动调度器
+        self.scheduler.start()
+        logger.info("任务调度器已启动")
 
         # 异步加载工具 (包括 MCP)
         logger.info("正在加载工具组件...")
@@ -88,19 +104,30 @@ class AutonomousAgent:
 
         while True:
             try:
-                # --- A. 感知阶段 ---
-                # 检查是否有新消息 (非阻塞或短超时)
-                try:
-                    # 尝试取出一个事件，但不阻塞太久，保证自主性
-                    event = await asyncio.wait_for(self.incoming_events.get(), timeout=1.0)
-                    # 处理新事件
-                    self._process_incoming_event(event)
-                    self.last_interaction_time = time.time() # 更新互动时间
-                except asyncio.TimeoutError:
-                    pass  # 没有新消息，继续执行自主逻辑
+                # --- A. 感知阶段 (Perception) ---
+                event = None
 
-                # --- B. 思考与决策阶段 ---
-                # 获取 Prompt 时传入时间
+                # 根据状态决定等待策略
+                if self.is_sleeping:
+                    # 如果处于休眠状态，完全阻塞等待，直到有新事件（用户输入 或 Timer唤醒）
+                    # 只有收到事件后，Agent 才会“醒来”
+                    event = await self.incoming_events.get()
+                    self.is_sleeping = False # 收到事件，解除休眠
+                    logger.info(f"⏰ Agent 结束休眠，收到事件: {event.type}")
+                else:
+                    # 如果处于活跃状态，使用短超时轮询，保持自主思考能力
+                    try:
+                        event = await asyncio.wait_for(self.incoming_events.get(), timeout=1.0)
+                        self.is_sleeping = False
+                    except asyncio.TimeoutError:
+                        pass  # 无新消息，继续执行
+
+                if event:
+                    self._process_incoming_event(event)
+                    self.last_interaction_time = time.time()
+
+                # --- B. 思考与决策阶段 (Thought) ---
+                # 更新 System Prompt 时间
                 system_prompt = self.prompt_manager.get_system_prompt(self.last_interaction_time)
 
                 # 每次循环更新 System Prompt (如果是每次都 append 会太长，建议替换 history[0])
@@ -109,6 +136,7 @@ class AutonomousAgent:
                     self.history[0]["content"] = system_prompt
                 else:
                     self.history.insert(0, {"role": "system", "content": system_prompt})
+
                 # 调用 LLM
                 response_msg = await self._call_llm()
 
@@ -131,11 +159,11 @@ class AutonomousAgent:
 
                     for tool_call in tool_calls:
                         function_name = tool_call["function"]["name"]
-                        arguments_str = tool_call["function"]["arguments"]
+                        args_str = tool_call["function"]["arguments"]
                         call_id = tool_call["id"]
 
                         try:
-                            args = json.loads(arguments_str)
+                            args = json.loads(args_str)
                             self.event_bus.publish_action(Action(
                                 action="broadcast_log",
                                 params={"content": f"🛠️ 调用: {function_name}({args})"}
@@ -181,16 +209,17 @@ class AutonomousAgent:
         """将外部事件格式化并插入上下文"""
         self.last_interaction_time = time.time()
 
-        if event.type == "message":
+        # 处理 Wake Up 通知
+        if event.type == "notice" and event.detail_type == "wake_up":
+            msg = f"系统 [Timer]: {event.message}"
+            self.history.append({"role": "user", "content": msg})
+            logger.info(f"上下文已更新: {msg} (唤醒)")
+
+        elif event.type == "message":
             self.current_user_id = event.source.user_id
             msg = f"用户 [{event.source.user_id}]: {event.message}"
             self.history.append({"role": "user", "content": msg})
             logger.info(f"上下文已更新: {msg}")
-
-        elif event.type == "notice" and event.detail_type == "wake_up":
-            msg = f"系统 [Timer]: {event.message}"
-            self.history.append({"role": "user", "content": msg})
-            logger.info(f"上下文已更新: {msg} (唤醒)")
 
     async def _call_llm(self) -> Dict[str, Any]:
         """封装 API 调用"""

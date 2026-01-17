@@ -1,0 +1,25 @@
+system:
+  log_level: "DEBUG"
+  bot_self_id: "Aethel-Trinity"
+
+  # IO 连接设置 (预留)
+  onebot_url: "ws://127.0.0.1:3001"
+  onebot_token: ""
+
+llm:
+  # 兼容 OpenAI 格式的 API 设置
+  api_base_url: "https://api.openai.com/v1"
+  api_key: "sk-YourKeyHere"
+  model_name: "gpt-4o"
+  embedding_model_name: "text-embedding-ada-002"
+
+proxy:
+  enabled: false
+  http: ""
+  https: ""
+
+mcp_servers:
+  # MCP 服务器配置示例 (后续阶段使用)
+  # filesystem:
+  #   command: "npx"
+  #   args: ["-y", "@modelcontextprotocol/server-filesystem", "./data"]

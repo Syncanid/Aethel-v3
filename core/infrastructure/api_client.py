@@ -1,3 +1,4 @@
+# core/infrastructure/api_client.py
 import logging
 from typing import Dict, Optional
 
@@ -26,12 +27,14 @@ class GenericAPIClient:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
+            # 调大超时时间，防止思考时间过长导致断连
+            timeout = aiohttp.ClientTimeout(total=120, connect=10, sock_read=120)
             self.session = aiohttp.ClientSession(
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json"
                 },
-                timeout=aiohttp.ClientTimeout(total=120)
+                timeout=timeout
             )
         return self.session
 
@@ -71,6 +74,13 @@ class GenericAPIClient:
                 return await resp.json()
         except Exception as e:
             logger.error(f"LLM API 调用失败: {e}")
+
+            # 发生错误时，强制关闭并重置 session
+            # 这样下一次重试时会创建一个全新的连接，避免 WinError 10053 复用死连接
+            if self.session:
+                await self.session.close()
+            self.session = None
+
             raise
 
     async def create_chat_completion_once(self, messages: str, system_prompt: str = None, model: str = None,
@@ -102,4 +112,8 @@ class GenericAPIClient:
                 return data['data'][0]['embedding']
         except Exception as e:
             logger.error(f"Embedding API 调用失败: {e}")
+            # Embedding 出错也同样重置连接
+            if self.session:
+                await self.session.close()
+            self.session = None
             return []
