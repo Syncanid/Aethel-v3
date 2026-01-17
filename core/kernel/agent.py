@@ -158,7 +158,6 @@ class AutonomousAgent:
                 # 1. 解析 JSON
                 try:
                     parsed_data = json.loads(content_str)
-                    print(parsed_data)
                     thought_content = parsed_data.get("thought", "")
                     # 获取工具列表，默认为空列表
                     tool_calls = parsed_data.get("tool_calls", [])

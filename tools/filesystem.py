@@ -204,5 +204,7 @@ async def manage_file(
                 shutil.copy2(src_path, dest_path)
             return f"已复制: {src_path} -> {dest_path}"
 
+        return "未知操作"
+
     except Exception as e:
         return f"文件管理操作 {action} 失败: {e}"
