@@ -40,11 +40,8 @@ class AutonomousAgent:
         # 记录唤醒任务的 ID
         self.wakeup_job_id = None
 
-        # 眠状态标记
+        # 睡眠状态标记
         self.is_sleeping = False
-
-        # 死锁检测计数器
-        self.consecutive_think_count = 0
 
         # --- 内部状态 ---
         self.history: List[Dict[str, Any]] = []
@@ -161,9 +158,10 @@ class AutonomousAgent:
                 # 1. 解析 JSON
                 try:
                     parsed_data = json.loads(content_str)
+                    print(parsed_data)
                     thought_content = parsed_data.get("thought", "")
                     # 获取工具列表，默认为空列表
-                    tool_call = parsed_data.get("tool_call", [])
+                    tool_calls = parsed_data.get("tool_calls", [])
 
                 except json.JSONDecodeError as e:
                     logger.error(f"❌ 模型输出格式错误: {e}")
@@ -181,36 +179,37 @@ class AutonomousAgent:
                 self.history.append({"role": "assistant", "content": content_str})
 
                 # 3. 处理并行工具调用
-                if tool_call:
-                    name = tool_call["name"]
-                    args = tool_call["arguments"]
+                if tool_calls:
+                    for tool_call in tool_calls:
+                        name = tool_call["name"]
+                        args = tool_call["arguments"]
 
-                    try:
-                        self.event_bus.publish_action(Action(
-                            action="broadcast_log",
-                            params={"content": f"🛠️ 调用: {name}({args})"}
-                        ))
+                        try:
+                            self.event_bus.publish_action(Action(
+                                action="broadcast_log",
+                                params={"content": f"🛠️ 调用: {name}({args})"}
+                            ))
 
-                        # 执行工具
-                        result = await self.tool_manager.execute_tool(name, args)
+                            # 执行工具
+                            result = await self.tool_manager.execute_tool(name, args)
 
-                        logger.debug("执行结果：" + json.dumps(result, indent=4, ensure_ascii=False))
+                            logger.debug("执行结果：" + json.dumps(result, indent=4, ensure_ascii=False))
 
-                        # 将结果存回历史
-                        self.history.append({
-                            "role": "tool",
-                            "name": name,
-                            "content": str(result)
-                        })
+                            # 将结果存回历史
+                            self.history.append({
+                                "role": "tool",
+                                "name": name,
+                                "content": str(result)
+                            })
 
-                    except Exception as e:
-                        logger.error(f"工具执行错误: {e}")
-                        traceback.print_exc()
-                        self.history.append({
-                            "role": "tool",
-                            "name": name,
-                            "content": f"错误: {str(e)}"
-                        })
+                        except Exception as e:
+                            logger.error(f"工具执行错误: {e}")
+                            traceback.print_exc()
+                            self.history.append({
+                                "role": "tool",
+                                "name": name,
+                                "content": f"错误: {str(e)}"
+                            })
                 elif not thought_content:
                     logger.warning("LLM 返回空内容，强制休眠")
                     await asyncio.sleep(5)
@@ -247,24 +246,27 @@ class AutonomousAgent:
                     "type": "string",
                     "description": "Chain of Thought: Step-by-step reasoning, memory retrieval verification, and plan formulation."
                 },
-                "tool_call": {
-                    "type": "object",
-                    "description": "The decision to call a specific tool or send a final message.",
-                    "properties": {
-                        "name": {
-                            "type": "string",
-                            "description": "The name of the function to call.",
+                "tool_calls": {
+                    "type": "array",
+                    "description": "A list of tools to call.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "description": "The name of the function to call."
+                            },
+                            "arguments": {
+                                "type": "object",
+                                "description": "The arguments for the function."
+                            }
                         },
-                        "arguments": {
-                            "type": "object",
-                            "description": "The arguments strictly matching the chosen function's schema."
-                        }
-                    },
-                    "required": ["name", "arguments"],
-                    "additionalProperties": False
+                        "required": ["name", "arguments"],
+                        "additionalProperties": False
+                    }
                 }
             },
-            "required": ["thought"],
+            "required": ["thought", "tool_calls"],
             "additionalProperties": False
         }
 

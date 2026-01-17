@@ -144,6 +144,46 @@ async def wait(
         return "系统错误: 调度器未初始化。"
 
 
+@register()
+async def wait_forever(
+        reason: str = "Standby",
+        agent: Any = None,
+        event_bus: EventBus = None
+) -> str:
+    """
+    [Control] 进入无限期休眠状态，直到收到外部事件（如用户消息）唤醒。
+    这比 wait(duration) 更适合空闲状态。
+
+    Args:
+        reason: 休眠的具体原因（例如："等待用户指令", "任务已完成"）。
+    """
+    if agent:
+        # 如果存在之前的定时唤醒任务（例如之前的 wait 设置的），则取消它
+        # 避免定时器在休眠期间意外触发唤醒
+        if hasattr(agent, "wakeup_job_id") and agent.wakeup_job_id:
+            try:
+                # 假设 agent.scheduler 是 AsyncIOScheduler 实例
+                agent.scheduler.remove_job(agent.wakeup_job_id)
+                logger.info(f"[WaitForever] 已移除原有的定时唤醒任务: {agent.wakeup_job_id}")
+            except Exception as e:
+                # 忽略任务不存在的错误
+                logger.debug(f"[WaitForever] 移除定时任务失败 (可能已不存在): {e}")
+            agent.wakeup_job_id = None
+
+        # 强制设置休眠标志
+        agent.is_sleeping = True
+        logger.info(f"Agent entering infinite sleep: {reason}")
+
+    # 广播系统状态变更
+    if event_bus:
+        event_bus.publish_action(Action(
+            action="broadcast_log",
+            params={"content": f"💤 系统进入无限期待命状态: {reason}"}
+        ))
+
+    return f"系统已进入无限期待命状态 ({reason})。停止思考循环，等待外部事件唤醒。"
+
+
 # --- 工具 2: 接入 EventBus 的 Python 解释器 ---
 
 class AethelInterface:

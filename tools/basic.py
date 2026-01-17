@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 @register()
 async def advanced_think(
         api_client: GenericAPIClient,
+        tool_manager: Any,
         goal: str,
         mode: Literal["plan", "reflect", "decompose", "validate", "brainstorm"] = "plan",
         context: Optional[str] = None,
@@ -32,10 +33,27 @@ async def advanced_think(
         包含步骤 (steps)、原理 (rationale) 和置信度 (confidence) 的结构化字典。
     """
 
+    # --- 0. 获取当前环境真实可用的工具列表 ---
+    tools_context_str = "暂无工具信息"
+    if tool_manager:
+        try:
+            # 获取所有工具的 Schema
+            schemas = tool_manager.get_tool_schemas()
+            tool_lines = []
+            for s in schemas:
+                func = s.get("function", {})
+                name = func.get("name", "unknown")
+                # 取描述的第一行，避免 Token 过多
+                desc = func.get("description", "无描述").strip().split('\n')[0]
+                tool_lines.append(f"- {name}: {desc}")
+            tools_context_str = "\n".join(tool_lines)
+        except Exception as e:
+            logger.warning(f"获取工具列表失败: {e}")
+
     # --- 1. 内部辅助函数：生成 Prompt ---
     def _generate_system_prompt(mode: str, constraints: Optional[List[str]]) -> str:
         mode_descriptions = {
-            "plan": "你是一个任务规划专家。将目标分解为清晰、有序、可执行的步骤。每个步骤应具体且无歧义。",
+            "plan": "你是一个注重实效的敏捷执行者。你的目标是快速找到解决当前问题的切入点，而不是制定完美的长期蓝图。",
             "reflect": "你是一个问题分析专家。分析先前行动失败的原因，识别根本问题，并提出改进建议。",
             "decompose": "你是一个问题分解专家。将复杂问题拆解为独立、可管理的子问题，确保覆盖所有关键方面。",
             "validate": "你是一个验证专家。严格检查数据/假设的有效性，识别潜在错误或不一致，并提供验证方法。",
@@ -44,15 +62,20 @@ async def advanced_think(
 
         base_prompt = (
             f"{mode_descriptions.get(mode, mode_descriptions['plan'])}\n\n"
-            "输出必须严格遵循JSON Schema格式。\n"
+            f"【环境约束】\n"
+            f"1. 你运行在一个受限的 Python 异步环境中。你必须通过调用工具来与外界交互。\n"
+            f"2. 以下是当前可用的工具列表，严禁使用列表之外的工具：\n"
+            f"{tools_context_str}\n\n"
             "重要规则:\n"
             "1. 语言: 使用与用户输入相同的语言\n"
             "2. 步骤数量: 通常3-7步，根据复杂度调整\n"
-            "3. 具体性: 步骤必须具体、可操作，避免模糊表述"
+            "3. 具体性: 步骤必须具体、可操作，并明确指出应调用的工具名称\n"
+            "4. 拒绝过度规划: 不要想得太远。仅规划接下来最关键、最直接的步骤。\n"
+            "5. 拥抱变化: 承认未来的不确定性，规划应聚焦于“获取信息”或“尝试执行”。"
         )
 
         if constraints:
-            base_prompt += "\n\n必须遵守的约束条件:\n"
+            base_prompt += "\n\n额外约束:\n"
             for i, constraint in enumerate(constraints, 1):
                 base_prompt += f"{i}. {constraint}\n"
 
@@ -63,7 +86,7 @@ async def advanced_think(
 
         if context:
             context_str = context if isinstance(context, str) else json.dumps(context, ensure_ascii=False)
-            message += f"\n相关上下文:\n{context_str}\n"
+            message += f"\n上下文信息:\n{context_str}\n"
 
         mode_prompts = {
             "plan": "请规划完成此目标的具体步骤",
