@@ -55,3 +55,18 @@ async def patch_system_code(
     reload_result = await tool_manager.reload_tool_module(module_name)
 
     return f"代码已修补。备份位于 {backup_path}。\n重载结果: {reload_result}"
+
+
+@register()
+async def reload_module(
+        module_name: str,
+        tool_manager: ToolManager
+) -> str:
+    """
+    [System] 热重载指定的 Python 模块。
+    用于在不重启进程的情况下应用代码变更。调用此工具会触发工具库的重新扫描。
+
+    Args:
+        module_name: 目标模块名 (e.g., 'tools.basic', 'tools.evolution')。
+    """
+    return await tool_manager.reload_tool_module(module_name)

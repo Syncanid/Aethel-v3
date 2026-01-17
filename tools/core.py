@@ -255,10 +255,19 @@ async def python_interpreter(
 ) -> str:
     """
     [Code] 执行一段 Python 脚本。
-    该环境具有高权限，可以通过 `api` 对象直接与系统系统交互。
+    该环境具有高权限，预置了全局对象 `api` 用于与系统交互。
+
+    使用说明：
+    1. `api` 是直接可用的全局对象，**严禁**使用 `import api` 或 `from api import ...`。
+    2. `api` 对象仅支持以下方法：
+       - `api.get_available_tools() -> List[Dict]`: 获取可用工具列表。
+       - `api.get_system_status() -> Dict`: 获取系统状态快照(含时间)。
+       - `api.send_event(type, detail_type, message, **kwargs)`: 注入事件。
+       - `api.dispatch_action(action_name, params)`: 触发动作。
+       - `api.print(*args)`: 打印日志。
 
     警告：
-    1. 【严禁模拟】绝对禁止编写代码来"手动定义"工具列表或系统状态字典（如 `tools = [...]`）。如果你需要这些信息，必须调用 `api.get_available_tools()` 或 `api.get_system_status()` 来动态获取真实数据。
+    1. 【严禁模拟】绝对禁止编写代码来"手动定义"工具列表或系统状态。
     2. 不要使用此工具来单纯打印文本，如果要回复用户，请使用 `send_message`。
 
     Args:
