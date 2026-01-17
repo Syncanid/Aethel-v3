@@ -201,7 +201,7 @@ class VectorStore:
         results = []
 
         # 核心记忆 (Key 匹配)
-        core_mems = await self.db.get_core_memory(user_id) # 需在 Database 类补充此方法
+        core_mems = await self.db.get_core_memory(user_id)  # 需在 Database 类补充此方法
         for k, v in core_mems.items():
             if query in k or query in v:
                 results.append(f"[核心档案] {k}: {v}")

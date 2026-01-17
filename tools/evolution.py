@@ -1,11 +1,9 @@
-import os
 import ast
 import logging
+import os
 
-from core.io.event_bus import EventBus
-from core.tool_manager.registry import register
-from core.infrastructure.config_loader import Config
 from core.tool_manager.aggregator import ToolManager  # 仅用于类型提示
+from core.tool_manager.registry import register
 
 logger = logging.getLogger(__name__)
 

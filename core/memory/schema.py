@@ -34,6 +34,7 @@ class BaseMemory:
             meta["valid_until"] = self.valid_until
         return meta
 
+
 @dataclass
 class EpisodicMemory(BaseMemory):
     """

@@ -1,10 +1,11 @@
+import json
 import logging
 import os
-import json
 from typing import List, Dict, Any
+
 from core.infrastructure.api_client import GenericAPIClient
-from core.memory.vector_store import VectorStore
 from core.memory.schema import SemanticMemory
+from core.memory.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
 

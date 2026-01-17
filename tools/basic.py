@@ -6,32 +6,8 @@ from core.infrastructure.api_client import GenericAPIClient
 from core.io.event_bus import EventBus
 from core.io.event_schema import Action
 from core.tool_manager.registry import register
-from core.utilities import process_llm_response
 
 logger = logging.getLogger(__name__)
-
-
-@register()
-async def think(
-        content: str,
-        event_bus: EventBus
-) -> str:
-    """
-    [Think] 进行深度思考、推理或规划。
-    在执行关键操作之前，或者遇到复杂问题时，请先使用此工具整理思路。
-    思考内容会被记录在系统日志中，作为你的思维链 (Chain of Thought)，有助于保持逻辑清晰。
-
-    Args:
-        content: 思考的具体内容、分析过程或下一步计划。
-    """
-    # 将思考过程广播到控制台，使用不同于普通日志的图标
-    event_bus.publish_action(Action(
-        action="broadcast_log",
-        params={"content": f"🧠 [思维链]: {content}"}
-    ))
-
-    # 返回值会被存入历史，强化记忆
-    return "思考过程已记录。"
 
 
 @register()
@@ -160,7 +136,7 @@ async def advanced_think(
         logger.info(f"🤔 高级思考激活: [{mode}] {goal}")
         response_data = await api_client.create_chat_completion(
             messages=messages,
-            schema=output_schema # 直接传入 Schema 启用 Structured Outputs
+            schema=output_schema  # 直接传入 Schema 启用 Structured Outputs
         )
 
         # 提取内容 (GenericAPIClient 返回完整的 OpenAI 格式 dict)

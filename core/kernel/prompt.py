@@ -1,6 +1,7 @@
+import datetime
 import os
 import time
-import datetime
+
 from core.infrastructure.config_loader import Config
 
 
@@ -9,7 +10,7 @@ class PromptManager:
         self.config = config
         self.prompt_path = "data/prompts/system_prompt.md"
         self._ensure_prompt_file()
-        self.start_time = time.time() # 记录系统启动时间
+        self.start_time = time.time()
 
     def _ensure_prompt_file(self):
         if not os.path.exists(self.prompt_path):
@@ -25,10 +26,14 @@ class PromptManager:
 
         # 判断时段
         hour = now.hour
-        if 5 <= hour < 12: period = "上午"
-        elif 12 <= hour < 18: period = "下午"
-        elif 18 <= hour < 22: period = "晚上"
-        else: period = "深夜"
+        if 5 <= hour < 12:
+            period = "上午"
+        elif 12 <= hour < 18:
+            period = "下午"
+        elif 18 <= hour < 22:
+            period = "晚上"
+        else:
+            period = "深夜"
 
         uptime = int(time.time() - self.start_time)
         uptime_str = f"{uptime // 3600}小时{(uptime % 3600) // 60}分钟"
@@ -40,8 +45,10 @@ class PromptManager:
 """
         if last_interaction_time:
             diff = int(time.time() - last_interaction_time)
-            if diff < 60: since = "刚刚"
-            else: since = f"{diff // 60}分钟前"
+            if diff < 60:
+                since = "刚刚"
+            else:
+                since = f"{diff // 60}分钟前"
             context += f"- 上次交互: {since}\n"
 
         return context

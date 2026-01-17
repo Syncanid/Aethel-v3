@@ -119,7 +119,7 @@ class AutonomousAgent:
                     # 如果处于休眠状态，完全阻塞等待，直到有新事件（用户输入 或 Timer唤醒）
                     # 只有收到事件后，Agent 才会“醒来”
                     event = await self.incoming_events.get()
-                    self.is_sleeping = False # 收到事件，解除休眠
+                    self.is_sleeping = False  # 收到事件，解除休眠
                     logger.info(f"⏰ Agent 结束休眠，收到事件: {event.type}")
                 else:
                     # 如果处于活跃状态，使用短超时轮询，保持自主思考能力
@@ -156,96 +156,63 @@ class AutonomousAgent:
                 response_msg = await self._call_llm()
 
                 # --- C. 行动阶段 (Action) ---
-                # 检查是否有工具调用
-                tool_calls = response_msg.get("tool_calls")
-                content = response_msg.get("content")
+                content_str = response_msg.get("content", "")
 
-                # 如果有文本内容，视为思考或闲聊，存入历史
-                if content:
-                    self.history.append({"role": "assistant", "content": content})
+                # 1. 解析 JSON
+                try:
+                    parsed_data = json.loads(content_str)
+                    thought_content = parsed_data.get("thought", "")
+                    # 获取工具列表，默认为空列表
+                    tool_call = parsed_data.get("tool_call", [])
+
+                except json.JSONDecodeError as e:
+                    logger.error(f"❌ 模型输出格式错误: {e}")
+                    self.history.append({"role": "assistant", "content": content_str})
+                    return
+
+                    # 2. 记录思考
+                if thought_content:
                     self.event_bus.publish_action(Action(
                         action="broadcast_log",
-                        params={"content": f"💭 {content}"}
+                        params={"content": f"💭 {thought_content}"}
                     ))
 
-                # 如果有工具调用，执行之
-                if tool_calls:
-                    self.history.append(response_msg)  # 必须把带 tool_calls 的消息存入历史
+                # 存入历史
+                self.history.append({"role": "assistant", "content": content_str})
 
-                    # 死锁检测逻辑
-                    is_pure_thinking = all(t["function"]["name"] in ["think", "wait"] for t in tool_calls)
+                # 3. 处理并行工具调用
+                if tool_call:
+                    name = tool_call["name"]
+                    args = tool_call["arguments"]
 
-                    if is_pure_thinking:
-                        self.consecutive_think_count += 1
-                    else:
-                        self.consecutive_think_count = 0  # 只要调用了其他工具，就重置计数
-
-                    # 触发熔断
-                    if self.consecutive_think_count >= 3:
-                        logger.warning(f"⚠️ 检测到认知死锁 (连续思考 {self.consecutive_think_count} 次)")
-
-                        # 强制注入系统警告，打断循环
-                        interrupt_msg = (
-                            "【系统警告】检测到你陷入了 'think' 循环。你已经连续思考了多次但没有采取实质行动。\n"
-                            "1. 立即停止使用 'think' 工具。\n"
-                            "2. 请调用 'groundbreaking_analysis' 工具来分析为什么你没有进展，并获取新的行动方案。"
-                        )
-
-                        self.history.append({
-                            "role": "system",
-                            "content": interrupt_msg
-                        })
-
-                        # 广播警告事件
+                    try:
                         self.event_bus.publish_action(Action(
                             action="broadcast_log",
-                            params={"content": "🚫 系统介入：打断思维死锁循环"}
+                            params={"content": f"🛠️ 调用: {name}({args})"}
                         ))
 
-                        continue
+                        # 执行工具
+                        result = await self.tool_manager.execute_tool(name, args)
 
-                    for tool_call in tool_calls:
-                        function_name = tool_call["function"]["name"]
-                        args_str = tool_call["function"]["arguments"]
-                        call_id = tool_call["id"]
+                        logger.debug("执行结果：" + json.dumps(result, indent=4, ensure_ascii=False))
 
-                        try:
-                            args = json.loads(args_str)
-                            self.event_bus.publish_action(Action(
-                                action="broadcast_log",
-                                params={"content": f"🛠️ 调用: {function_name}({args})"}
-                            ))
+                        # 将结果存回历史
+                        self.history.append({
+                            "role": "tool",
+                            "name": name,
+                            "content": str(result)
+                        })
 
-                            # 执行工具
-                            result = await self.tool_manager.execute_tool(function_name, args)
-
-                            logger.debug("执行结果：" + json.dumps(result, indent=4, ensure_ascii=False))
-
-                            # 将结果存回历史
-                            self.history.append({
-                                "role": "tool",
-                                "tool_call_id": call_id,
-                                "name": function_name,
-                                "content": str(result)
-                            })
-
-                        except Exception as e:
-                            logger.error(f"工具执行错误: {e}")
-                            traceback.print_exc()
-                            self.history.append({
-                                "role": "tool",
-                                "tool_call_id": call_id,
-                                "name": function_name,
-                                "content": f"错误: {str(e)}"
-                            })
-
-                    # 工具执行完后，不需要立即 continue，而是自然进入下一个循环
-                    # 这样 LLM 可以看到工具结果并决定下一步
-                else:
-                    # 如果 LLM 既没说话也没调工具 (极少情况)，或者只说了话
-                    # 避免死循环狂刷 API，如果没有工具调用，强制休眠一小会
-                    if not content:
-                        logger.warning("LLM 返回空内容，强制休眠")
+                    except Exception as e:
+                        logger.error(f"工具执行错误: {e}")
+                        traceback.print_exc()
+                        self.history.append({
+                            "role": "tool",
+                            "name": name,
+                            "content": f"错误: {str(e)}"
+                        })
+                elif not thought_content:
+                    logger.warning("LLM 返回空内容，强制休眠")
                     await asyncio.sleep(5)
 
             except Exception as e:
@@ -272,8 +239,40 @@ class AutonomousAgent:
         """封装 API 调用"""
         schemas = self.tool_manager.get_tool_schemas()
 
+        # 定义强制思维 Schema (JSON Schema)
+        thought_structure = {
+            "type": "object",
+            "properties": {
+                "thought": {
+                    "type": "string",
+                    "description": "Chain of Thought: Step-by-step reasoning, memory retrieval verification, and plan formulation."
+                },
+                "tool_call": {
+                    "type": "object",
+                    "description": "The decision to call a specific tool or send a final message.",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "The name of the function to call.",
+                        },
+                        "arguments": {
+                            "type": "object",
+                            "description": "The arguments strictly matching the chosen function's schema."
+                        }
+                    },
+                    "required": ["name", "arguments"],
+                    "additionalProperties": False
+                }
+            },
+            "required": ["thought"],
+            "additionalProperties": False
+        }
+
+        # 调用 API，同时传入 tools 和 schema
         response = await self.api_client.create_chat_completion(
             messages=self.history,
-            tools=schemas if schemas else None
+            tools=schemas if schemas else None,
+            schema=thought_structure
         )
+
         return response["choices"][0]["message"]

@@ -1,12 +1,14 @@
 # tools/scheduler.py
-import asyncio
 import logging
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from core.tool_manager.registry import register
+
 from core.io.event_bus import EventBus
 from core.io.event_schema import OneBotEvent, EventType, DetailType, EventSource
+from core.tool_manager.registry import register
 
 logger = logging.getLogger(__name__)
+
 
 async def _send_reminder(event_bus: EventBus, user_id: str, content: str):
     """调度器回调函数：发送提醒事件"""
@@ -25,13 +27,14 @@ async def _send_reminder(event_bus: EventBus, user_id: str, content: str):
     )
     event_bus.publish_event(event)
 
+
 @register()
 async def add_reminder(
-    seconds: int,
-    content: str,
-    scheduler: AsyncIOScheduler, # 注入
-    event_bus: EventBus,         # 注入
-    user_id: str                 # 注入 (当前用户)
+        seconds: int,
+        content: str,
+        scheduler: AsyncIOScheduler,  # 注入
+        event_bus: EventBus,  # 注入
+        user_id: str  # 注入 (当前用户)
 ) -> str:
     """
     [Schedule] 设置一个一次性的倒计时提醒。
@@ -43,7 +46,7 @@ async def add_reminder(
     scheduler.add_job(
         _send_reminder,
         'date',
-        run_date=None, # 立即计算
+        run_date=None,  # 立即计算
         args=[event_bus, user_id, content],
         kwargs=None,
         coalesce=True,
@@ -67,13 +70,14 @@ async def add_reminder(
 
     return f"已设定提醒，将在 {seconds} 秒后通知你。"
 
+
 @register()
 async def add_cron_job(
-    cron_expression: str,
-    content: str,
-    scheduler: AsyncIOScheduler, # 注入
-    event_bus: EventBus,         # 注入
-    user_id: str                 # 注入
+        cron_expression: str,
+        content: str,
+        scheduler: AsyncIOScheduler,  # 注入
+        event_bus: EventBus,  # 注入
+        user_id: str  # 注入
 ) -> str:
     """
     [Schedule] 设置一个周期性的 Cron 任务。

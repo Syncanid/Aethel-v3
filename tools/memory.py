@@ -25,10 +25,10 @@ def _get_store():
 
 @register()
 async def remember_core_info(
-    key: str,
-    value: str,
-    event_bus: EventBus,
-    user_id: str
+        key: str,
+        value: str,
+        event_bus: EventBus,
+        user_id: str
 ) -> str:
     """
     [写入] 记住关于用户的核心信息 (Core Memory)。
@@ -86,9 +86,9 @@ async def update_knowledge_status(
 
 @register()
 async def recall_memory(
-    query: str,
-    event_bus: EventBus,
-    user_id: str
+        query: str,
+        event_bus: EventBus,
+        user_id: str
 ) -> str:
     """
     [读取] 主动搜索记忆库。

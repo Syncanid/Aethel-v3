@@ -1,14 +1,13 @@
 # tools/knowledge.py
-import logging
 import os
-from typing import Dict, Any
-from core.tool_manager.registry import register
+
+from core.infrastructure.api_client import GenericAPIClient
 from core.infrastructure.config_loader import get_config
 from core.infrastructure.database import Database
-from core.infrastructure.api_client import GenericAPIClient
-from core.memory.vector_store import VectorStore
-from core.memory.ingestor import KnowledgeIngestor
 from core.io.event_bus import EventBus
+from core.memory.ingestor import KnowledgeIngestor
+from core.memory.vector_store import VectorStore
+from core.tool_manager.registry import register
 
 # 单例辅助
 _ingestor = None
