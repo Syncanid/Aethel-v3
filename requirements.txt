@@ -1,9 +1,0 @@
-pydantic~=2.12.5
-APScheduler~=3.11.2
-colorlog~=6.10.1
-aiosqlite~=0.22.1
-chromadb~=1.4.1
-aiohttp~=3.13.3
-PyYAML~=6.0.3
-python-dateutil~=2.9.0.post0
-httpx~=0.28.1

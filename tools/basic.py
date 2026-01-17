@@ -185,3 +185,87 @@ async def advanced_think(
             "steps": [],
             "confidence": 0.0
         }
+
+
+@register()
+async def groundbreaking_analysis(
+        problem_statement: str,
+        context: str,
+        api_client: GenericAPIClient,
+        event_bus: EventBus
+) -> Dict[str, Any]:
+    """
+    [Cognition] 开创性分析工具 (Groundbreaking Analysis)。
+    当你发现自己陷入重复思考、无法推进任务、或者不知道下一步该做什么时，必须调用此工具。
+    它会帮助你跳出当前的思维定势，进行深度的根本原因分析 (Root Cause Analysis)，并提供创新性的解决方案。
+
+    Args:
+        problem_statement: 当前遇到的核心障碍或死锁原因（例如：“我一直在检查状态但没有实际进展”）。
+        context: 相关的背景信息或之前的尝试。
+
+    Returns:
+        包含 'diagnosis' (诊断), 'lateral_thinking' (侧向思维), 'actionable_plan' (行动计划) 的结构化数据。
+    """
+
+    # 广播开始分析的信号
+    event_bus.publish_action(Action(
+        action="broadcast_log",
+        params={"content": f"💡 正在进行开创性分析: {problem_statement}"}
+    ))
+
+    # 1. 定义输出 Schema
+    analysis_schema = {
+        "type": "object",
+        "properties": {
+            "diagnosis": {
+                "type": "string",
+                "description": "死锁诊断：分析为什么会卡在当前的循环中（例如：过度谨慎、缺乏工具、指令模糊）。"
+            },
+            "lateral_thinking": {
+                "type": "string",
+                "description": "侧向思维：提供一个完全不同于之前尝试的视角或解决思路。"
+            },
+            "actionable_plan": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "行动指令：3个具体的、可立即执行的下一步行动建议（必须包含具体的工具调用建议）。"
+            }
+        },
+        "required": ["diagnosis", "lateral_thinking", "actionable_plan"],
+        "additionalProperties": False
+    }
+
+    # 2. 简化 Prompt，专注于任务逻辑而非格式
+    system_prompt = """
+你是一个高级 AI 策略顾问。你的客户（一个 AI Agent）陷入了思维死锁或循环。
+请帮助它破局。你的任务不是直接给出代码，而是提供策略性的指导。
+运用“第一性原理”和“侧向思维”来重新审视问题。
+"""
+
+    user_prompt = f"问题描述: {problem_statement}\n上下文: {context}"
+
+    try:
+        # 3. 调用 API 并传入 schema
+        result = await api_client.create_chat_completion_once(
+            messages=user_prompt,
+            system_prompt=system_prompt,
+            schema=analysis_schema
+        )
+
+        content = result["content"]
+
+        # 4. 解析结果
+        try:
+            analysis_data = json.loads(content)
+
+            # 记录分析结果
+            logger.info(f"分析完成: {analysis_data.get('diagnosis')}")
+            return analysis_data
+
+        except json.JSONDecodeError:
+            logger.error(f"尽管使用了 Schema，返回内容仍非有效 JSON: {content}")
+            return {"error": "解析分析结果失败", "raw": content}
+
+    except Exception as e:
+        logger.error(f"开创性分析失败: {e}")
+        return {"error": str(e)}

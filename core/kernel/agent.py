@@ -5,6 +5,7 @@ import time
 import traceback
 from typing import List, Dict, Any
 
+from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from core.infrastructure.api_client import GenericAPIClient
@@ -36,8 +37,14 @@ class AutonomousAgent:
         # 初始化任务调度器
         self.scheduler = AsyncIOScheduler()
 
+        # 记录唤醒任务的 ID
+        self.wakeup_job_id = None
+
         # 眠状态标记
         self.is_sleeping = False
+
+        # 死锁检测计数器
+        self.consecutive_think_count = 0
 
         # --- 内部状态 ---
         self.history: List[Dict[str, Any]] = []
@@ -119,6 +126,14 @@ class AutonomousAgent:
                     try:
                         event = await asyncio.wait_for(self.incoming_events.get(), timeout=1.0)
                         self.is_sleeping = False
+                        if self.wakeup_job_id:
+                            try:
+                                self.scheduler.remove_job(self.wakeup_job_id)
+                                logger.debug(f"已取消剩余的唤醒定时器: {self.wakeup_job_id}")
+                            except JobLookupError:
+                                pass
+                            self.wakeup_job_id = None
+                        logger.info(f"⏰ Agent 结束休眠，收到事件: {event.type}")
                     except asyncio.TimeoutError:
                         pass  # 无新消息，继续执行
 
@@ -156,6 +171,38 @@ class AutonomousAgent:
                 # 如果有工具调用，执行之
                 if tool_calls:
                     self.history.append(response_msg)  # 必须把带 tool_calls 的消息存入历史
+
+                    # 死锁检测逻辑
+                    is_pure_thinking = all(t["function"]["name"] in ["think", "wait"] for t in tool_calls)
+
+                    if is_pure_thinking:
+                        self.consecutive_think_count += 1
+                    else:
+                        self.consecutive_think_count = 0  # 只要调用了其他工具，就重置计数
+
+                    # 触发熔断
+                    if self.consecutive_think_count >= 3:
+                        logger.warning(f"⚠️ 检测到认知死锁 (连续思考 {self.consecutive_think_count} 次)")
+
+                        # 强制注入系统警告，打断循环
+                        interrupt_msg = (
+                            "【系统警告】检测到你陷入了 'think' 循环。你已经连续思考了多次但没有采取实质行动。\n"
+                            "1. 立即停止使用 'think' 工具。\n"
+                            "2. 请调用 'groundbreaking_analysis' 工具来分析为什么你没有进展，并获取新的行动方案。"
+                        )
+
+                        self.history.append({
+                            "role": "system",
+                            "content": interrupt_msg
+                        })
+
+                        # 广播警告事件
+                        self.event_bus.publish_action(Action(
+                            action="broadcast_log",
+                            params={"content": "🚫 系统介入：打断思维死锁循环"}
+                        ))
+
+                        continue
 
                     for tool_call in tool_calls:
                         function_name = tool_call["function"]["name"]

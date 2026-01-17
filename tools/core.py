@@ -125,14 +125,20 @@ async def wait(
 
     # 2. 添加调度任务
     if scheduler and run_date:
-        scheduler.add_job(
+        # 获取 job 对象
+        job = scheduler.add_job(
             _dispatch_wake_up,
             'date',
             run_date=run_date,
             args=[event_bus, reason]
         )
+
+        # 将 Job ID 绑定到 Agent 实例，用于后续取消
+        if agent:
+            agent.wakeup_job_id = job.id
+            agent.is_sleeping = True
+
         timestamp_str = run_date.strftime("%Y-%m-%d %H:%M:%S")
-        agent.is_sleeping = True
         return f"已进入休眠模式。系统将在 {timestamp_str} 唤醒，原因: {reason}。"
     else:
         return "系统错误: 调度器未初始化。"
@@ -224,9 +230,15 @@ async def python_interpreter(
     # 将依赖传入接口
     interface = AethelInterface(event_bus, tool_manager, agent_state)
 
+    available_tools = []
+    if tool_manager:
+        available_tools = tool_manager.get_tool_schemas()
+
     sandbox_globals = {
         "__builtins__": __builtins__,  # 允许基础内置函数
         "api": interface,
+        "tools": available_tools,
+        "agent_state": agent_state,
         "datetime": datetime,
         "asyncio": asyncio,
         "json": json,

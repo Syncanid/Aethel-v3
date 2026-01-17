@@ -23,3 +23,5 @@ mcp_servers:
   # filesystem:
   #   command: "npx"
   #   args: ["-y", "@modelcontextprotocol/server-filesystem", "./data"]
+
+searxng_base_url: "http://127.0.0.1:8080"

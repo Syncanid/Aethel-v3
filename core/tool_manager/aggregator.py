@@ -3,6 +3,7 @@ import importlib
 import inspect
 import logging
 import os
+import sys
 from typing import Dict, Any, List
 
 from core.infrastructure.api_client import GenericAPIClient
@@ -155,3 +156,34 @@ class ToolManager:
                     return f"MCP工具错误: {str(e)}"
 
         return f"错误: 未找到工具 '{name}'"
+
+    async def reload_tool_module(self, module_name: str) -> str:
+        """
+        [系统核心] 热重载指定的工具模块。
+        """
+        # 1. 检查模块是否已加载
+        if module_name not in sys.modules:
+            return f"模块 {module_name} 未加载，无法重载。"
+
+        try:
+            # 2. 获取旧模块对象
+            module = sys.modules[module_name]
+
+            # 3. 使用 importlib.reload 强制重新编译并执行模块代码
+            importlib.reload(module)
+
+            # 4. 重新注册该模块下的工具
+            # 注意：这需要你的 _load_local_tools 逻辑能处理更新
+            # 简单做法是：重新运行一遍 _load_local_tools 里的扫描逻辑，或者针对该模块单独处理
+
+            # 清除旧的 schema 缓存（简化处理，这里建议重新生成全部）
+            self._local_tools.clear()
+            self._schemas.clear()
+            self._load_local_tools()  # 重新扫描所有，确保依赖关系正确
+
+            logger.info(f"模块 {module_name} 热重载成功")
+            return f"模块 {module_name} 已重载，新代码已生效。"
+
+        except Exception as e:
+            logger.error(f"热重载失败: {e}", exc_info=True)
+            return f"重载失败: {str(e)}"
