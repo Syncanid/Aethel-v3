@@ -12,7 +12,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dateutil import parser
 
 from core.io.event_bus import EventBus
-from core.io.event_schema import OneBotEvent, EventType, EventSource, Action
+from core.io.event_schema import OneBotEvent, EventType, EventSource, Action, ActionStatus
 from core.kernel.agent import AutonomousAgent
 from core.tool_manager.registry import register
 
@@ -38,7 +38,7 @@ async def send_message(
     """
 
     if not target_id:
-        return "错误: 无法确定发送目标。"
+        return "错误: 无法确定发送目标 (target_id 为空)。"
 
     # 2. 构造 Action 参数
     params = {
@@ -55,8 +55,36 @@ async def send_message(
         target_platform=platform  # 指定平台适配器处理
     )
 
-    event_bus.publish_action(action)
-    return f"消息已发送至 [{platform}] {target_type}: {target_id}"
+    # 2. 同步分发并等待结果
+    try:
+        # 设置 10 秒超时，避免 Agent 永久卡死
+        response = await event_bus.dispatch_action(action, timeout=10.0)
+
+        # 3. 处理不同的结果状态
+        if response.status == ActionStatus.OK:
+            # 成功
+            return f"消息已发送 [{platform}] {target_type}: {target_id}"
+
+        else:
+            # 失败处理
+            error_msg = response.message
+
+            # 特殊错误：平台不存在 (Route not matched)
+            if "Route not matched" in error_msg:
+                return (
+                    f"发送失败: 找不到平台适配器 '{platform}'。\n"
+                    f"可能原因：\n"
+                    f"1. 平台名称拼写错误\n"
+                    f"2. 该平台的适配器未在 main.py 中加载"
+                )
+
+            # 其他错误 (如网络超时、被禁言)
+            return f"发送失败: {error_msg}"
+
+    except asyncio.TimeoutError:
+        return f"发送超时: 平台 '{platform}' 在 10 秒内没有响应。"
+    except Exception as e:
+        return f"系统异常: 发送过程中发生错误 - {str(e)}"
 
 
 # --- 内部辅助函数：发送唤醒事件 ---
@@ -245,7 +273,7 @@ async def python_interpreter(
         agent_state: Dict[str, Any] = None
 ) -> str:
     """
-    [Code] 执行一段 Python 脚本。
+    [Code] 执行一段 Python 脚本，返回stdout和stderr。
     该环境具有高权限，预置了全局对象 `api` 用于与系统交互。
 
     使用说明：
@@ -310,3 +338,27 @@ async def python_interpreter(
         result_msg += "\n(脚本执行完毕，无文本输出)"
 
     return result_msg
+
+
+@register()
+async def get_active_adapters(adapters: List[Any]) -> str:
+    """
+    [System] 获取当前系统已加载的所有 IO 适配器列表。
+    用于检查系统是否正确连接到了各个平台（如 Console, OneBot 等）。
+    """
+    lines = ["当前活跃的适配器接口:"]
+    for i, adapter in enumerate(adapters, 1):
+        # 获取平台名称 (BaseAdapter 属性)
+        name = getattr(adapter, "platform_name", "Unknown")
+        # 获取类名作为辅助信息
+        class_name = adapter.__class__.__name__
+
+        # 尝试获取运行状态 (如果适配器有 is_running 属性)
+        status_suffix = ""
+        if hasattr(adapter, "_running"):
+            status = "运行中" if getattr(adapter, "_running") else "已停止"
+            status_suffix = f" - {status}"
+
+        lines.append(f"{i}. {name.upper()} ({class_name}){status_suffix}")
+
+    return "\n".join(lines)

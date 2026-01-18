@@ -16,8 +16,6 @@ from core.io.event_bus import EventBus
 # --- 认知内核层 ---
 from core.kernel.agent import AutonomousAgent
 
-# from core.io.adapters.websocket import OneBotAdapter # (预留：后续对接 OneBot)
-
 # --- 装饰 ---
 BANNER = r"""
     ___    ______   ______  __  __   ______   __
@@ -78,6 +76,7 @@ class AethelSystem:
         self.adapters.append(ob_adapter)
         self.agent.tool_manager.add_dependency("ob_adapter", ob_adapter)
 
+        self.agent.tool_manager.add_dependency("adapters", self.adapters)
         logger.info("系统组件初始化完成。")
 
     async def start(self):
