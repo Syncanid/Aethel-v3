@@ -2,7 +2,7 @@
 import asyncio
 import datetime
 import io
-import json  # 确保导入 json
+import json
 import logging
 import sys
 import traceback
@@ -17,36 +17,6 @@ from core.kernel.agent import AutonomousAgent
 from core.tool_manager.registry import register
 
 logger = logging.getLogger(__name__)
-
-
-@register()
-async def update_scratchpad(
-        goal: str,
-        progress: str,
-        next_action: str,
-        agent_state: Dict[str, Any],  # 依赖注入
-        event_bus: EventBus  # 依赖注入
-) -> str:
-    """
-    更新你的内部状态（记事本）。
-    当你的目标改变、取得进展或决定采取新计划时，请务必调用此工具。
-
-    Args:
-        goal: 你当前正在努力实现的最高级目标。
-        progress: 到目前为止已完成工作的总结。
-        next_action: 你计划立即采取的下一步行动。
-    """
-    # 直接修改注入的引用
-    agent_state["goal"] = goal
-    agent_state["progress"] = progress
-    agent_state["next_action"] = next_action
-
-    # 广播日志
-    event_bus.publish_action(Action(
-        action="broadcast_log",
-        params={"content": f"📝 状态已更新: {json.dumps(agent_state, ensure_ascii=False)}"}
-    ))
-    return "记事本更新成功。"
 
 
 @register()

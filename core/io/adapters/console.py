@@ -1,9 +1,10 @@
 import asyncio
 import logging
 import sys
+from typing import Optional
 
 from core.io.adapters.base import BaseAdapter
-from core.io.event_schema import OneBotEvent, EventType, DetailType, EventSource, Action
+from core.io.event_schema import OneBotEvent, EventType, DetailType, EventSource, Action, ActionResponse, ActionStatus
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,7 @@ class ConsoleAdapter(BaseAdapter):
                 logger.error(f"控制台输入错误: {e}")
                 await asyncio.sleep(1)
 
-    async def handle_action(self, action: Action):
+    async def handle_action(self, action: Action) -> Optional[ActionResponse]:
         """
         处理输出动作
         """
@@ -65,8 +66,13 @@ class ConsoleAdapter(BaseAdapter):
             msg = params.get("message", "")
             # 模拟机器人回复的格式
             print(f"\n[Aethel] >> {msg}\n")
+            # 始终返回成功
+            return ActionResponse(status=ActionStatus.OK, message="Printed to console")
 
         elif action.action == "broadcast_log":
             # 用于显示 Agent 的思考过程
             content = action.params.get("content", "")
             print(f"[状态] {content}")
+            return ActionResponse(status=ActionStatus.OK)
+
+        return None

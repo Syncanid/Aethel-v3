@@ -81,7 +81,10 @@ class Hippocampus:
         """调用 LLM 转化记忆"""
         prompt = """
 你是一个顶尖的认知科学家，也是 AI 的“海马体”（记忆整理中枢）。
-你的任务是阅读【待处理对话】，将短期的对话流转化为长期的结构化记忆。
+你的任务是将短期的对话流转化为长期的、结构化的、高密度的记忆。
+- 不要逐字记录对话。请将多轮对话概括为一个简洁的事实或事件。
+- 示例：将 "用户：我是程序员" "助手：懂了" "用户：主要写Python" 
+ -> 压缩为 Core Memory: `job: Python Programmer`
 
 请遵循以下分类标准进行提取：
 
@@ -90,18 +93,20 @@ class Hippocampus:
    - 格式：key (如 `basic:name`) 和 content。
 
 2. 情景记忆 (Episodic):
-   - 记录发生的具体事件（谁做了什么）。
-   - 过滤掉无效的闲聊（如“你好”），只保留有意义的交互。
+   - 记录"发生了什么重要的事情"。
+   - 必须包含：时间点、参与者、核心动作、结果。
+   - 丢弃：打招呼、客套话、重复的确认。
 
 3. 语义记忆 (Semantic):
-   - 抽象的知识、事实或观点（如“Python 是一种语言”）。
+   - 提取通用知识、观点或事实。
+   - 必须是独立的、去语境化的陈述。
 
 请输出 JSON 格式:
 {
   "memories": [
-    {"type": "core", "key": "...", "content": "..."},
-    {"type": "episodic", "content": "..."},
-    {"type": "semantic", "content": "..."}
+    {"type": "core", "key": "category:name", "content": "简洁的值"},
+    {"type": "episodic", "content": "第三人称描述具体事件"},
+    {"type": "semantic", "content": "独立的知识条目"}
   ]
 }
 """

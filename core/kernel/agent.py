@@ -335,12 +335,12 @@ class AutonomousAgent:
             del event_data["time"]
         if "raw_data" in event_data:
             del event_data["raw_data"]
-        if "message" in event_data:
+        if "message" in event_data and "alt_message" in event_data:
             del event_data["message"]
 
         # 3. 构造 LLM 友好的 Prompt
         # 使用 JSON 代码块，让 LLM 能够精准解析字段 (如 group_id, platform)
-        context_msg = f"📩 [Event Received]\n{json.dumps(event_data, ensure_ascii=False)}"
+        context_msg = f"[Event Received]\n{json.dumps(event_data, ensure_ascii=False)}"
 
         # 4. 自动更新 Scratchpad 中的上下文状态 (可选)
         # 这有助于 Agent 在不调用工具的情况下默认知道回复目标

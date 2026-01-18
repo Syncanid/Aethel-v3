@@ -1,5 +1,6 @@
 # core/memory/vector_store.py
 import datetime
+import difflib
 import logging
 import time
 import uuid
@@ -75,7 +76,9 @@ class VectorStore:
         logger.info(f"核心记忆已更新: {key} -> {content}")
 
     async def save_vector_memory(self, memory: Union[EpisodicMemory, SemanticMemory], user_id: str):
-        """保存向量记忆"""
+        """
+        保存向量记忆 (带去重、压缩检测)
+        """
         try:
             # 1. 生成向量
             embedding = await self.api_client.create_embedding(memory.content)
@@ -83,20 +86,92 @@ class VectorStore:
                 logger.warning("向量生成失败，跳过存储")
                 return
 
-            # 2. 准备数据
-            metadata = memory.to_metadata()
-            metadata["user_id"] = user_id
-
             collection = self.episodic_coll if isinstance(memory, EpisodicMemory) else self.semantic_coll
 
-            # 3. 写入 Chroma
-            collection.add(
-                embeddings=[embedding],
-                documents=[memory.content],
-                metadatas=[metadata],
-                ids=[str(uuid.uuid4())]
+            # 2. [去重检测] 查询最近似的 1 条记忆
+            # 我们假设如果语义距离极近 (< 0.15) 且 文本相似度高，则是重复
+            existing = collection.query(
+                query_embeddings=[embedding],
+                n_results=1,
+                where={"user_id": user_id}
             )
-            logger.debug(f"向量记忆已保存 [{metadata['type']}]: {memory.content[:20]}...")
+
+            is_duplicate = False
+            duplicate_id = None
+            existing_doc = None
+
+            # 检查是否有返回结果
+            if existing['ids'] and existing['ids'][0]:
+                existing_id = existing['ids'][0][0]
+                existing_doc = existing['documents'][0][0]
+                existing_dist = existing['distances'][0][0] # Chroma 默认 L2 距离
+
+                # 判定标准：向量距离很近 (根据模型调整，一般 < 0.2 表示非常相似)
+                # 且 文本重合度高 (避免“我喜欢猫”和“我不喜欢猫”向量很近但意思相反的情况)
+                if existing_dist < 0.2:
+                    # 计算文本相似度 (SequenceMatcher)
+                    similarity = difflib.SequenceMatcher(None, memory.content, existing_doc).ratio()
+                    if similarity > 0.85:
+                        is_duplicate = True
+                        duplicate_id = existing_id
+                        logger.info(f"检测到重复记忆 (相似度 {similarity:.2f})，触发合并策略。")
+
+            # 3. 分支处理
+            if is_duplicate:
+                # 策略 A: 语义记忆 -> 合并关键词，更新时间
+                if isinstance(memory, SemanticMemory):
+                     # 获取旧的 metadata
+                    old_meta = existing['metadatas'][0][0]
+
+                    # 合并关键词 (去重)
+                    old_keywords = old_meta.get("keywords", "").split(",")
+                    new_keywords = memory.keywords
+                    merged_keywords = list(set([k for k in old_keywords if k] + new_keywords))
+
+                    # 更新 metadata
+                    old_meta["keywords"] = ",".join(merged_keywords)
+                    old_meta["last_accessed"] = time.time() # 刷新活跃时间
+
+                    # 如果新内容更长/更详细，替换旧内容；否则保留旧内容
+                    final_content = existing_doc
+                    if len(memory.content) > len(existing_doc) + 10: # 显著更长
+                        final_content = memory.content
+                        # 需要重新更新向量吗？如果内容变了最好更新，但为了节省资源，
+                        # 如果是 update 操作，Chroma 需要传入 embedding。
+                        # 这里我们复用本次生成的 embedding
+                        collection.update(
+                            ids=[duplicate_id],
+                            embeddings=[embedding],
+                            documents=[final_content],
+                            metadatas=[old_meta]
+                        )
+                        logger.info(f"语义记忆已更新 (内容增强): {final_content[:20]}...")
+                    else:
+                        # 仅更新 metadata
+                        collection.update(
+                            ids=[duplicate_id],
+                            metadatas=[old_meta]
+                        )
+                        logger.info(f"语义记忆已更新 (仅刷新热度): {final_content[:20]}...")
+
+                # 策略 B: 情景记忆 -> 仅刷新时间，忽略重复
+                # (同一个事件不需要存两次)
+                else:
+                    logger.info("重复的情景记忆，已跳过存储。")
+                    return
+
+            else:
+                # 4. 无重复 -> 正常写入
+                metadata = memory.to_metadata()
+                metadata["user_id"] = user_id
+
+                collection.add(
+                    embeddings=[embedding],
+                    documents=[memory.content],
+                    metadatas=[metadata],
+                    ids=[str(uuid.uuid4())]
+                )
+                logger.debug(f"向量记忆已保存: {memory.content[:20]}...")
 
         except Exception as e:
             logger.error(f"向量存储失败: {e}", exc_info=True)

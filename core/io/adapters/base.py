@@ -1,7 +1,9 @@
+# core/io/adapters/base.py
 from abc import ABC, abstractmethod
+from typing import Optional
 
 from core.io.event_bus import EventBus
-from core.io.event_schema import Action
+from core.io.event_schema import Action, ActionResponse
 
 
 class BaseAdapter(ABC):
@@ -15,8 +17,13 @@ class BaseAdapter(ABC):
         pass
 
     @abstractmethod
-    async def handle_action(self, action: Action):
-        """处理系统发出的动作 (如 send_message)"""
+    async def handle_action(self, action: Action) -> Optional[ActionResponse]:
+        """
+        处理系统发出的动作
+        Return:
+            - ActionResponse: 处理成功或失败的结果
+            - None: 此适配器不处理该 Action (忽略)
+        """
         pass
 
     @property

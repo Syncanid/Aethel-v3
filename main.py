@@ -10,6 +10,7 @@ from core.infrastructure.config_loader import Config
 from core.infrastructure.database import Database
 from core.infrastructure.logger import setup_logger
 from core.io.adapters.console import ConsoleAdapter
+from core.io.adapters.onebot_v11 import OneBotV11Adapter
 # --- 神经系统层 ---
 from core.io.event_bus import EventBus
 # --- 认知内核层 ---
@@ -71,6 +72,11 @@ class AethelSystem:
         # 控制台适配器 (始终启用)
         console_adapter = ConsoleAdapter(self.bus)
         self.adapters.append(console_adapter)
+
+        # OneBot v11 适配器
+        ob_adapter = OneBotV11Adapter(self.bus, self.config)
+        self.adapters.append(ob_adapter)
+        self.agent.tool_manager.add_dependency("ob_adapter", ob_adapter)
 
         logger.info("系统组件初始化完成。")
 
