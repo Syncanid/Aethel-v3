@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-import time
 import traceback
 from typing import List, Dict, Any
 
@@ -11,10 +10,12 @@ from core.infrastructure.api_client import GenericAPIClient
 from core.infrastructure.config_loader import Config
 from core.infrastructure.database import Database
 from core.io.event_bus import EventBus
-from core.io.event_schema import OneBotEvent, Action
+from core.io.event_schema import OneBotEvent, Action, DetailType, EventType
 from core.kernel.prompt import PromptManager
+from core.limbic.manager import LimbicManager
 from core.memory.hippocampus import Hippocampus
 from core.memory.vector_store import VectorStore
+from core.social.manager import UserManager
 from core.tool_manager.aggregator import ToolManager
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,12 @@ class AutonomousAgent:
         self.hippocampus = Hippocampus(config, self.api_client, database)
         self.vector_store = VectorStore(database, self.api_client)
 
+        # 初始化边缘系统
+        self.limbic = LimbicManager(config, database, event_bus, self.api_client)
+
+        # 初始化用户管理器
+        self.user_manager = UserManager(database)
+
         # 初始化任务调度器
         self.scheduler = AsyncIOScheduler()
 
@@ -44,7 +51,7 @@ class AutonomousAgent:
         # --- 内部状态 ---
         self.history: List[Dict[str, Any]] = []
         self.scratchpad: Dict[str, Any] = {
-            "current_goal": "System Standby",
+            "current_goal": "",
             "subtasks": [],
             "variables": {},
             "progress_summary": "All systems initialized."
@@ -63,6 +70,8 @@ class AutonomousAgent:
         # 注入 Scheduler 和 Agent 自身
         self.tool_manager.add_dependency("agent", self)
         self.tool_manager.add_dependency("scheduler", self.scheduler)
+        self.tool_manager.add_dependency("limbic", self.limbic)
+        self.tool_manager.add_dependency("user_manager", self.user_manager)
 
         # 消息缓冲区 (处理中断)
         self.incoming_events: asyncio.Queue = asyncio.Queue()
@@ -147,13 +156,23 @@ class AutonomousAgent:
         self.scheduler.start()
         logger.info("任务调度器已启动")
 
+        # 注册边缘系统心跳任务 (每 5 分钟一次)
+        self.scheduler.add_job(self.limbic.tick, 'interval', minutes=5)
+        logger.info("边缘系统心跳已挂载 (Interval: 5m)")
+
+        # 初始化 Social DB
+        await self.user_manager.initialize()
+
         # 异步加载工具 (包括 MCP)
         logger.info("正在加载工具组件...")
         await self.tool_manager.initialize()
 
+        # 初始化边缘系统数据库
+        await self.limbic.initialize()
+
         # 3. 初始 Prompt 注入检索到的记忆 (RAG)
         # 简单起见，这里先检索 "Context" 相关的
-        mems = await self.vector_store.search_memory("重要信息", "admin_console")
+        mems = await self.vector_store.search_memory("重要信息", "system_boot")
         mem_context = "\n".join(mems) if mems else "暂无记忆"
 
         # 1. 注入初始系统上下文
@@ -166,7 +185,7 @@ class AutonomousAgent:
         # 3. 注入启动信号
         self.history.append({
             "role": "user",
-            "content": f"系统启动完成。确立当前目标，并开始工作。"
+            "content": f"系统启动完成。"
         })
 
         while True:
@@ -192,7 +211,7 @@ class AutonomousAgent:
                         pass
 
                 if event:
-                    self._process_incoming_event(event)
+                    await self._process_incoming_event(event)
                     if self.wakeup_job_id:
                         try:
                             self.scheduler.remove_job(self.wakeup_job_id)
@@ -206,18 +225,24 @@ class AutonomousAgent:
                 # [v1 移植] 上下文修剪
                 self._prune_context()
 
-                # 更新 System Prompt (包含最新的 Scratchpad 注入)
-                # 注意：这里我们不再依赖 update_scratchpad 工具，而是每次循环直接注入当前 self.scratchpad 状态
-                system_prompt_base = self.prompt_manager.get_system_prompt()
+                # 动态生成 System Prompt
+                # 1. 获取当前神经状态
+                current_neuro_state = await self.limbic.get_state()
+
+                # 2. 生成带有状态描述的 Prompt
+                system_prompt_base = self.prompt_manager.get_system_prompt(neuro_state=current_neuro_state)
+
+                # 3. 附加 Scratchpad
                 scratchpad_dump = json.dumps(self.scratchpad, indent=2, ensure_ascii=False)
 
                 final_system_prompt = (
                     f"{system_prompt_base}\n\n"
                     f"## 🧠 当前认知状态 (Scratchpad)\n"
                     f"这是你必须维护的内部状态，每次响应必须更新此状态：\n"
-                    f"```json\n{scratchpad_dump}\n```"
+                    f"{scratchpad_dump}"
                 )
 
+                # 更新历史记录中的 System Prompt
                 if self.history and self.history[0]["role"] == "system":
                     self.history[0]["content"] = final_system_prompt
                 else:
@@ -232,7 +257,7 @@ class AutonomousAgent:
                     logger.warning("⚠️ 检测到死锁：模型输出与上一次完全一致。")
                     self.history.append({
                         "role": "user",
-                        "content": "SYSTEM WARNING: 你陷入了死循环，输出与上一次完全相同。请改变策略，不要重复相同的思考或无效操作。"
+                        "content": "SYSTEM WARNING: 你陷入了死循环。请改变策略。"
                     })
                     self.last_response_content = ""  # 重置以允许下一次尝试
                     continue  # 跳过本次处理，直接进入下一轮接收系统警告
@@ -256,12 +281,15 @@ class AutonomousAgent:
                         self.tool_manager.agent_state = self.scratchpad
 
                 except json.JSONDecodeError as e:
-                    logger.error(f"❌ 模型输出格式错误: {e}")
-                    self.history.append({"role": "assistant", "content": content_str})
+                    logger.error(f"JSON 解析失败: {e}")
+                    self.history.append({
+                        "role": "assistant",
+                        "content": content_str
+                    })
                     # 注入格式错误提示
                     self.history.append({
                         "role": "user",
-                        "content": f"SYSTEM ERROR: JSON 解析失败。请严格按照 Schema 输出 JSON 格式，不要包含 Markdown 代码块标记。Error: {e}"
+                        "content": f"SYSTEM ERROR: JSON Format Error: {e}"
                     })
                     continue
 
@@ -280,6 +308,11 @@ class AutonomousAgent:
                     for tool_call in tool_calls:
                         name = tool_call.get("name")
                         args = tool_call.get("arguments", {})
+
+                        # 如果 Agent 决定使用聊天工具，这会消耗能量并恢复社交值
+                        # 可以在 execute_tool 内部 hook，或者在这里手动调用 limbic
+                        if name in ["send_message"]:
+                            self.limbic.homeostasis.consume_resource(current_neuro_state, "chat")
 
                         try:
                             self.event_bus.publish_action(Action(
@@ -308,11 +341,6 @@ class AutonomousAgent:
                                 "content": f"Error: {str(e)}"
                             })
 
-                # 如果没有工具调用且没有明确的目标，考虑休眠
-                elif not tool_calls and self.scratchpad.get("current_goal") in ["System Standby", "Wait for user"]:
-                    logger.info("系统空闲，进入休眠模式...")
-                    self.is_sleeping = True
-
                 # 避免过热空转
                 if not tool_calls:
                     await asyncio.sleep(1)
@@ -321,38 +349,94 @@ class AutonomousAgent:
                 logger.error(f"主循环异常: {e}", exc_info=True)
                 await asyncio.sleep(5)  # 出错冷却
 
-    def _process_incoming_event(self, event: OneBotEvent):
+    async def _process_incoming_event(self, event: OneBotEvent):
         """
-        [Refactored] 将外部事件完整序列化并插入上下文，保留 OneBot v12 语义。
+        处理外部事件：
+        1. 让边缘系统“感受”刺激 (Process Stimulus)
+        2. 将事件写入历史记录
         """
-        # 1. 序列化事件对象
-        event_data = event.model_dump(exclude_none=True)
+        # 1. 边缘系统介入 (只处理文本消息)
+        # 只有真实人类的消息才算作"刺激"，内部信号不算
+        if event.type == EventType.MESSAGE and isinstance(event.message, str):
+            # 异步调用，不阻塞主流程太多
+            asyncio.create_task(self.limbic.process_stimulus(event.message))
 
-        # 2. 移除可能过大的原始数据字段
-        if "id" in event_data:
-            del event_data["id"]
-        if "time" in event_data:
-            del event_data["time"]
-        if "raw_data" in event_data:
-            del event_data["raw_data"]
+        # 自动捕获用户
+        # 尝试从 source 中获取用户信息
+        adapters = self.tool_manager.dependency_map.get("adapters")
+        adapter_names = []
+        for i, adapter in enumerate(adapters, 1):
+            adapter_names.append(getattr(adapter, "platform_name", "Unknown"))
+
+
+        if event.source.user_id and event.source.platform in adapter_names:
+            platform = event.source.platform
+            raw_id = event.source.user_id
+
+            # 1. 计算 UID
+            uid = self.user_manager.resolve_uid(platform, raw_id)
+
+            # 2. 查询用户 (只读)
+            user_profile = await self.user_manager.get_user(uid)
+
+            # 3. 注入上下文 (Scratchpad)
+            interactor_info = {
+                "uid": uid,
+                "platform": platform,
+                "user_id": raw_id,
+            }
+
+            if user_profile:
+                # [熟人]
+                interactor_info.update({
+                    "status": "KNOWN",
+                    "nickname": user_profile.nickname,
+                    "relationship_tags": user_profile.relationship_tags,
+                    "favorability": user_profile.favorability,
+                    "trust": user_profile.trust,
+                    "impression": user_profile.impression
+                })
+            else:
+                # [陌生人]
+                interactor_info.update({
+                    "status": "STRANGER",
+                    "note": "User not in database. Use tool `social_register_user` if you wish to remember them."
+                })
+
+            # 更新 Scratchpad
+            self.scratchpad["current_interactor"] = interactor_info
+
+        # 2. 序列化事件
+        event_data = event.model_dump(exclude_none=True)
+        # 清理冗余字段
+        for field in ["id", "time", "raw_data"]:
+            if field in event_data: del event_data[field]
         if "message" in event_data and "alt_message" in event_data:
             del event_data["message"]
 
-        # 3. 构造 LLM 友好的 Prompt
-        # 使用 JSON 代码块，让 LLM 能够精准解析字段 (如 group_id, platform)
-        context_msg = f"[Event Received]\n{json.dumps(event_data, ensure_ascii=False)}"
+        # [特殊处理] 如果是内部驱动信号，添加高亮提示
+        prefix = ""
+        if event.detail_type == DetailType.INTERNAL_DRIVE:
+            prefix = "[INTERNAL SIGNAL - URGENT]\n"
+            # 强制唤醒
+            self.is_sleeping = False
 
-        # 4. 自动更新 Scratchpad 中的上下文状态 (可选)
-        # 这有助于 Agent 在不调用工具的情况下默认知道回复目标
-        source = event.source
-        if source.group_id:
-            self.scratchpad["last_context"] = {"platform": source.platform, "type": "group", "id": source.group_id}
-        else:
-            self.scratchpad["last_context"] = {"platform": source.platform, "type": "private", "id": source.user_id}
+        context_msg = f"{prefix}[Event Received]\n{json.dumps(event_data, ensure_ascii=False)}"
 
-        # 5. 存入历史
+        # 3. 更新 Scratchpad 上下文 (如果是消息事件)
+        if event.source.platform != "internal":
+            source = event.source
+            ctx_type = "group" if source.group_id else "private"
+            ctx_id = source.group_id if source.group_id else source.user_id
+
+            self.scratchpad["last_context"] = {
+                "platform": source.platform,
+                "type": ctx_type,
+                "id": ctx_id
+            }
+
         self.history.append({"role": "user", "content": context_msg})
-        logger.info(f"Event Ingested: {event.type}.{event.detail_type} from {source.platform}")
+        logger.info(f"Event Ingested: {event.type}.{event.detail_type}")
 
     async def _call_llm(self) -> Dict[str, Any]:
         """封装 API 调用"""
@@ -414,6 +498,8 @@ class AutonomousAgent:
             "required": ["thought", "scratchpad", "tool_calls"],
             "additionalProperties": False
         }
+
+        print(self.history)
 
         # 调用 API，同时传入 tools 和 schema
         response = await self.api_client.create_chat_completion(

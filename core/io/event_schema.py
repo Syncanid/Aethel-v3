@@ -20,6 +20,8 @@ class DetailType(str, Enum):
     HEARTBEAT = "heartbeat"
     CONNECT = "connect"
     STATUS_UPDATE = "status_update"
+    INTERNAL_DRIVE = "internal_drive"
+
     # Message
     PRIVATE = "private"
     GROUP = "group"
@@ -40,8 +42,8 @@ class ActionStatus(str, Enum):
 
 class EventSource(BaseModel):
     """事件来源描述"""
-    platform: str  # 平台名称，如 'console', 'qq', 'telegram'
-    user_id: str  # 用户ID
+    platform: str  # 平台名称，如 'console', 'qq', 'telegram', 'internal'
+    user_id: Optional[str] = None  # 用户ID
     group_id: Optional[str] = None
     channel_id: Optional[str] = None
 

@@ -31,7 +31,7 @@ class ToolManager:
         self._schemas: List[Dict[str, Any]] = []
 
         # 依赖注入容器
-        self._dependency_map = {
+        self.dependency_map = {
             "config": config,
             "event_bus": event_bus,
             "api_client": api_client,
@@ -41,7 +41,7 @@ class ToolManager:
         }
 
     def add_dependency(self, name: str, dependency):
-        self._dependency_map[name] = dependency
+        self.dependency_map[name] = dependency
 
     async def initialize(self):
         """初始化：加载本地工具 + 连接 MCP"""
@@ -88,7 +88,7 @@ class ToolManager:
             props = schema["function"]["parameters"]["properties"]
             required = schema["function"]["parameters"]["required"]
 
-            for dep in self._dependency_map.keys():
+            for dep in self.dependency_map.keys():
                 if dep in props:
                     del props[dep]
                 if dep in required:
@@ -112,7 +112,7 @@ class ToolManager:
             call_kwargs = args.copy()
 
             # 合并静态依赖和动态上下文
-            runtime_deps = self._dependency_map.copy()
+            runtime_deps = self.dependency_map.copy()
             if context:
                 runtime_deps.update(context)
 

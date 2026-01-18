@@ -63,8 +63,8 @@ async def reload_module(
         tool_manager: ToolManager
 ) -> str:
     """
-    [System] 热重载指定的 Python 模块。
-    用于在不重启进程的情况下应用代码变更。调用此工具会触发工具库的重新扫描。
+    [System] 热重载指定的系统模块。
+    调用此工具会触发工具库的重新扫描。
 
     Args:
         module_name: 目标模块名 (e.g., 'tools.basic', 'tools.evolution')。

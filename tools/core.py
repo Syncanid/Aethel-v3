@@ -165,7 +165,7 @@ async def wait(
 
 @register()
 async def wait_forever(
-        reason: str = "Standby",
+        reason: str,
         agent: Any = None,
         event_bus: EventBus = None
 ) -> str:

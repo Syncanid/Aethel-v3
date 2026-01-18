@@ -4,12 +4,13 @@ import os
 import platform
 import sys
 import time
-from typing import Any
+from typing import Any, Optional
 
 import yaml
 from typing_extensions import LiteralString
 
 from core.infrastructure.config_loader import Config
+from core.limbic.arch import NeuroState
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +147,37 @@ prime_directives:
 - 系统启动时间: {uptime_str}
 """
 
-    def get_system_prompt(self) -> str:
+    def _get_neuro_context(self, state: Optional[NeuroState]) -> str:
+        if not state:
+            return ""
+
+        # 将数值转化为自然语言描述，增强 LLM 的理解
+        def level_desc(val, low="低", mid="中", high="高"):
+            if val < 0.3: return low
+            if val > 0.7: return high
+            return mid
+
+        # 情绪基调判断
+        mood_tone = "平静"
+        if state.dopamine > 0.7: mood_tone = "兴奋/充满动力"
+        elif state.cortisol > 0.6: mood_tone = "焦虑/压力大"
+        elif state.serotonin > 0.7: mood_tone = "满足/安详"
+        elif state.social_satiety < 0.3: mood_tone = "孤独/渴望交流"
+
+        return f"""
+## 生理与情绪状态 (Neuro-State)
+当前并非处于无状态，而是拥有模拟的神经化学反应：
+- 整体基调: {mood_tone}
+- 动力与好奇: {state.dopamine:.2f} ({level_desc(state.dopamine, "缺乏动力", "正常", "好奇心强")})
+- 压力水平: {state.cortisol:.2f} ({level_desc(state.cortisol, "放松", "适中", "高度紧张")})
+- 情绪稳定度: {state.serotonin:.2f}
+- 社交饱腹感: {state.social_satiety:.2f} ({level_desc(state.social_satiety, "极度孤独", "正常", "充实")})
+- 认知能量: {state.cognitive_energy:.2f} ({level_desc(state.cognitive_energy, "疲劳", "尚可", "精力充沛")})
+
+*指令*: 请根据上述状态微调你的回复语气。例如压力大时更简短防御，兴奋时更发散主动，孤独时更热情。
+"""
+
+    def get_system_prompt(self, neuro_state: Optional[NeuroState] = None) -> str:
         """获取 System Prompt"""
         try:
             with open(self.prompt_path, "r", encoding="utf-8-sig") as f:
@@ -158,9 +189,10 @@ prime_directives:
         content = content.replace("\r\n", "\n").replace("\r", "\n").strip()
         base_prompt = content
 
-        # 系统与时间上下文
+        # 组装各个模块
         system_block = self._get_system_context()
         time_block = self._get_time_context()
+        neuro_block = self._get_neuro_context(neuro_state)
 
         # 合并输出
-        return "\n".join([self.role, base_prompt, system_block, time_block])
+        return "\n".join([self.role, base_prompt, system_block, time_block, neuro_block])

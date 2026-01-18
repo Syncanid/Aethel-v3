@@ -59,5 +59,6 @@ def setup_logger(config: Config):
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("chromadb").setLevel(logging.WARNING)
     logging.getLogger("aiosqlite").setLevel(logging.WARNING)
+    logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
     logging.getLogger("core").info(f"日志系统已启动，级别: {level_str}")
