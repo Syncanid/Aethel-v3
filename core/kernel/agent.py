@@ -27,7 +27,6 @@ class AutonomousAgent:
         self.database = database
         self.api_client = GenericAPIClient(config)
         self.prompt_manager = PromptManager(config)
-        self.last_interaction_time = None
 
         # 初始化记忆组件
         self.hippocampus = Hippocampus(config, self.api_client, database)
@@ -323,20 +322,37 @@ class AutonomousAgent:
                 await asyncio.sleep(5)  # 出错冷却
 
     def _process_incoming_event(self, event: OneBotEvent):
-        """将外部事件格式化并插入上下文"""
-        self.last_interaction_time = time.time()
+        """
+        [Refactored] 将外部事件完整序列化并插入上下文，保留 OneBot v12 语义。
+        """
+        # 1. 序列化事件对象
+        event_data = event.model_dump(exclude_none=True)
 
-        # 处理 Wake Up 通知
-        if event.type == "notice" and event.detail_type == "wake_up":
-            msg = f"系统 [Timer]: {event.message}"
-            self.history.append({"role": "user", "content": msg})
-            logger.info(f"上下文已更新: {msg} (唤醒)")
+        # 2. 移除可能过大的原始数据字段
+        if "id" in event_data:
+            del event_data["id"]
+        if "time" in event_data:
+            del event_data["time"]
+        if "raw_data" in event_data:
+            del event_data["raw_data"]
+        if "message" in event_data:
+            del event_data["message"]
 
-        elif event.type == "message":
-            self.current_user_id = event.source.user_id
-            msg = f"用户 [{event.source.user_id}]: {event.message}"
-            self.history.append({"role": "user", "content": msg})
-            logger.info(f"上下文已更新: {msg}")
+        # 3. 构造 LLM 友好的 Prompt
+        # 使用 JSON 代码块，让 LLM 能够精准解析字段 (如 group_id, platform)
+        context_msg = f"📩 [Event Received]\n{json.dumps(event_data, ensure_ascii=False)}"
+
+        # 4. 自动更新 Scratchpad 中的上下文状态 (可选)
+        # 这有助于 Agent 在不调用工具的情况下默认知道回复目标
+        source = event.source
+        if source.group_id:
+            self.scratchpad["last_context"] = {"platform": source.platform, "type": "group", "id": source.group_id}
+        else:
+            self.scratchpad["last_context"] = {"platform": source.platform, "type": "private", "id": source.user_id}
+
+        # 5. 存入历史
+        self.history.append({"role": "user", "content": context_msg})
+        logger.info(f"Event Ingested: {event.type}.{event.detail_type} from {source.platform}")
 
     async def _call_llm(self) -> Dict[str, Any]:
         """封装 API 调用"""
@@ -368,9 +384,19 @@ class AutonomousAgent:
                             }
                         },
                         "variables": {"type": "object", "description": "存储临时数据或ID"},
+                        "last_context": {
+                            "type": "object",
+                            "description": "最近的对话上下文（由系统自动注入，请在更新 Scratchpad 时保留此对象，以便工具调用时自动寻址）",
+                            "properties": {
+                                "platform": {"type": "string"},
+                                "type": {"type": "string", "enum": ["private", "group"]},
+                                "id": {"type": "string"}
+                            },
+                            "required": ["platform", "type", "id"]
+                        },
                         "progress_summary": {"type": "string", "description": "简要总结已完成的工作"}
                     },
-                    "required": ["current_goal", "subtasks", "progress_summary"]
+                    "required": ["current_goal", "subtasks", "last_context", "progress_summary"]
                 },
                 "tool_calls": {
                     "type": "array",

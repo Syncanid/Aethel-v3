@@ -6,7 +6,7 @@ import json  # 确保导入 json
 import logging
 import sys
 import traceback
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Literal
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dateutil import parser
@@ -52,20 +52,41 @@ async def update_scratchpad(
 @register()
 async def send_message(
         message: str,
-        event_bus: EventBus
+        target_id: str,
+        platform: str,
+        target_type: Literal["private", "group", "channel"],
+        event_bus: EventBus = None,
 ) -> str:
     """
-    向用户或控制台发送文本消息。
-    使用此工具回复用户或陈述你的发现。
+    发送消息。支持指定发送目标（私聊/群组）。
 
     Args:
-        message: 消息的具体内容。
+        message: 消息内容。
+        target_id: 目标用户ID 或 群组ID。
+        platform: 目标平台 (如 'qq', 'telegram')。
+        target_type: 消息类型 ('private', 'group', 'channel')。
     """
-    event_bus.publish_action(Action(
+
+    if not target_id:
+        return "错误: 无法确定发送目标。"
+
+    # 2. 构造 Action 参数
+    params = {
+        "message": message,
+        "user_id": target_id if target_type == "private" else None,
+        "group_id": target_id if target_type == "group" else None,
+        "detail_type": target_type
+    }
+
+    # 3. 发布动作
+    action = Action(
         action="send_message",
-        params={"message": message}
-    ))
-    return "消息已外发。"
+        params=params,
+        target_platform=platform  # 指定平台适配器处理
+    )
+
+    event_bus.publish_action(action)
+    return f"消息已发送至 [{platform}] {target_type}: {target_id}"
 
 
 # --- 内部辅助函数：发送唤醒事件 ---
