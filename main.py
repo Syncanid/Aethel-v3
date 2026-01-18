@@ -10,6 +10,7 @@ from core.infrastructure.config_loader import Config
 from core.infrastructure.database import Database
 from core.infrastructure.logger import setup_logger
 from core.io.adapters.console import ConsoleAdapter
+from core.io.adapters.onebot import OneBotAdapter
 # --- 神经系统层 ---
 from core.io.event_bus import EventBus
 # --- 认知内核层 ---
@@ -72,9 +73,17 @@ class AethelSystem:
         console_adapter = ConsoleAdapter(self.bus)
         self.adapters.append(console_adapter)
 
-        # OneBot 适配器 (根据配置启用)
-        # if self.config.get("system.onebot_url"):
-        #     self.adapters.append(OneBotAdapter(self.bus, self.config))
+        # OneBot 适配器
+        if self.config.get("onebot_enabled", True):  # 或者检查 URL 是否存在
+            onebot_adapter = OneBotAdapter(self.bus, self.config)
+            self.adapters.append(onebot_adapter)
+
+            # [CRITICAL] 依赖注入
+            # 将适配器实例注入到 Agent 的 ToolManager 中
+            # 这样所有定义了 parameter `bot_client` 的工具都会自动获得这个实例
+            self.agent.tool_manager.add_dependency("bot_client", onebot_adapter)
+
+            logger.info("OneBot 适配器已挂载并注入工具层。")
 
         logger.info("系统组件初始化完成。")
 

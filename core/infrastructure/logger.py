@@ -6,6 +6,7 @@ from datetime import datetime
 import colorlog
 
 from core.infrastructure.config_loader import Config
+from core.utilities import get_log_filename
 
 
 def setup_logger(config: Config):
@@ -18,13 +19,7 @@ def setup_logger(config: Config):
     # 2. 准备日志目录
     log_dir = "data/logs"
     os.makedirs(log_dir, exist_ok=True)
-
-    counter = 0
     base_name = f"{log_dir}/Aethel_Trinity_{datetime.now().strftime('%Y-%m-%d')}"
-    log_filename = f"{base_name}.log"
-    while os.path.exists(log_filename):
-        counter += 1
-        log_filename = f"{base_name}-{counter}.log"
 
     # 3. 配置 Root Logger
     logger = logging.getLogger()
@@ -54,7 +49,7 @@ def setup_logger(config: Config):
     logger.addHandler(console_handler)
 
     # 5. 文件 Handler (普通文本)
-    file_handler = logging.FileHandler(log_filename, encoding='utf-8')
+    file_handler = logging.FileHandler(get_log_filename(base_name), encoding='utf-8')
     file_handler.setLevel(log_level)
     file_fmt = "%(asctime)s - %(levelname)s - %(name)s:%(lineno)d - %(message)s"
     file_handler.setFormatter(logging.Formatter(file_fmt))

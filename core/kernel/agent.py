@@ -62,8 +62,8 @@ class AutonomousAgent:
         )
 
         # 注入 Scheduler 和 Agent 自身
-        self.tool_manager.set_scheduler(self.scheduler)
-        self.tool_manager.set_agent(self)
+        self.tool_manager.add_dependency("agent", self)
+        self.tool_manager.add_dependency("scheduler", self.scheduler)
 
         # 消息缓冲区 (处理中断)
         self.incoming_events: asyncio.Queue = asyncio.Queue()

@@ -1,10 +1,10 @@
 system:
   log_level: "DEBUG"
-  bot_self_id: "Aethel-Trinity"
 
   # IO 连接设置 (预留)
   onebot_url: "ws://127.0.0.1:3001"
   onebot_token: ""
+  bot_self_id: 12345678
 
 llm:
   # 兼容 OpenAI 格式的 API 设置

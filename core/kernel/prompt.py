@@ -1,13 +1,17 @@
 import datetime
+import logging
 import os
 import platform
 import sys
 import time
+from typing import Any
 
 import yaml
+from typing_extensions import LiteralString
 
 from core.infrastructure.config_loader import Config
 
+logger = logging.getLogger(__name__)
 
 class PromptManager:
     def __init__(self, config: Config):
@@ -17,6 +21,10 @@ class PromptManager:
         self._ensure_prompt_file()
         self._ensure_role_yaml()
         self.start_time = time.time()
+
+        self.role, role_data = self._load_role_yaml()
+
+        logger.info("已加载角色卡："+role_data.get("identity").get("name"))
 
     def _ensure_prompt_file(self):
         if not os.path.exists(self.prompt_path):
@@ -55,7 +63,7 @@ prime_directives:
             with open(self.role_yaml_path, "w", encoding="utf-8") as f:
                 f.write(default_yaml)
 
-    def _load_role_yaml(self) -> str:
+    def _load_role_yaml(self) -> str | tuple[LiteralString, Any]:
         """读取并格式化 YAML 角色卡为中文 System Prompt 段落"""
         try:
             with open(self.role_yaml_path, "r", encoding="utf-8-sig") as f:
@@ -94,7 +102,7 @@ prime_directives:
             for d in directives:
                 blocks.append(f"- {d}")
 
-        return "\n".join(blocks)
+        return "\n".join(blocks), role_data
 
     def _get_system_context(self) -> str:
         """获取系统环境上下文"""
@@ -150,12 +158,9 @@ prime_directives:
         content = content.replace("\r\n", "\n").replace("\r", "\n").strip()
         base_prompt = content
 
-        # 读取角色 YAML
-        role_block = self._load_role_yaml()
-
         # 系统与时间上下文
         system_block = self._get_system_context()
         time_block = self._get_time_context()
 
         # 合并输出
-        return "\n".join([role_block, base_prompt, system_block, time_block])
+        return "\n".join([self.role, base_prompt, system_block, time_block])
