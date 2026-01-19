@@ -11,6 +11,7 @@ llm:
   api_base_url: "https://api.openai.com/v1"
   api_key: "sk-YourKeyHere"
   model_name: "gpt-4o"
+  model_context: 32767
   embedding_model_name: "text-embedding-ada-002"
 
   prompt_file: "data/prompts/system_prompt.md"
