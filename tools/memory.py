@@ -25,25 +25,26 @@ def _get_store():
 
 @register()
 async def remember_core_info(
+        user_uid: str,
         key: str,
         value: str,
         event_bus: EventBus,
-        user_id: str
 ) -> str:
     """
     [写入] 记住关于用户的核心信息 (Core Memory)。
     用于记录用户的长期属性、偏好、关系等结构化信息。
 
     Args:
-        key: 信息的键名，建议格式 '类别:名称' (如 'basic:name', 'pref:food')。
-        value: 具体内容 (如 '张三', '喜欢吃辣')。
+        user_uid: 用户唯一标识 (platform:user_id)
+        key: 信息的键名，建议格式 '类别:名称' (如 'basic:name')。
+        value: 具体内容。
     """
     store = _get_store()
-    await store.save_core_memory(user_id, key, value)
+    await store.save_core_memory(user_uid, key, value)
 
     event_bus.publish_action(Action(
         action="broadcast_log",
-        params={"content": f"💾 已写入核心记忆 [{user_id}]: {key} = {value}"}
+        params={"content": f"💾 已写入核心记忆: {key} = {value}"}
     ))
     return f"已记住: {key} 是 {value}"
 

@@ -96,7 +96,7 @@ class ToolManager:
 
             self._local_tools[tool_name] = func
             self._schemas.append(schema)
-            logger.info(f"本地工具已注册: {tool_name}")
+            logger.debug(f"本地工具已注册: {tool_name}")
 
         clear_pending()
 

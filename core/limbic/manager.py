@@ -141,7 +141,7 @@ class LimbicManager:
         # 2. 检查内驱力
         drive, intensity = self.homeostasis.check_drives(state)
 
-        logger.debug(f"tick limbic: {drive}, {intensity}\n{state}")
+        logger.debug(f"tick limbic: {drive}, {intensity}")
 
         monitor_registry.register_metric_source("Dopamine (Motivation)", lambda: state.dopamine)
         monitor_registry.register_metric_source("Serotonin (Satisfaction)", lambda: state.serotonin)

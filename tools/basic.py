@@ -43,8 +43,8 @@ async def advanced_think(
             for s in schemas:
                 func = s.get("function", {})
                 name = func.get("name", "unknown")
-                # 取描述的第一行，避免 Token 过多
-                desc = func.get("description", "无描述").strip().split('\n')[0]
+                if name == "advanced_think": continue
+                desc = func.get("description", "无描述").strip()
                 tool_lines.append(f"- {name}: {desc}")
             tools_context_str = "\n".join(tool_lines)
         except Exception as e:
@@ -141,10 +141,10 @@ async def advanced_think(
             },
             "suggested_next_action": {
                 "type": ["string", "null"],
-                "description": "建议的后续行动，如 tool 名称"
+                "description": "建议的后续行动"
             }
         },
-        "required": ["steps", "rationale", "confidence"],
+        "required": ["steps", "rationale", "confidence", "suggested_next_action"],
         "additionalProperties": False
     }
 

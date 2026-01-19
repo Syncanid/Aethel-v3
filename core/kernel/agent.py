@@ -30,25 +30,6 @@ class AutonomousAgent:
         self.api_client = GenericAPIClient(config)
         self.prompt_manager = PromptManager(config)
 
-        # 初始化记忆组件
-        self.hippocampus = Hippocampus(config, self.api_client, self.event_bus, database)
-        self.vector_store = VectorStore(database, self.api_client)
-
-        # 初始化边缘系统
-        self.limbic = LimbicManager(config, database, event_bus, self.api_client)
-
-        # 初始化用户管理器
-        self.user_manager = UserManager(database)
-
-        # 初始化任务调度器
-        self.scheduler = AsyncIOScheduler()
-
-        # 记录唤醒任务的 ID
-        self.wakeup_job_id = None
-
-        # 睡眠状态标记
-        self.is_sleeping = False
-
         # --- 内部状态 ---
         self.history: List[Dict[str, Any]] = []
         self.scratchpad: Dict[str, Any] = {
@@ -67,6 +48,25 @@ class AutonomousAgent:
             database=database,
             agent_state=self.scratchpad
         )
+
+        # 初始化记忆组件
+        self.hippocampus = Hippocampus(config, self.api_client, database, self.history)
+        self.vector_store = VectorStore(database, self.api_client)
+
+        # 初始化边缘系统
+        self.limbic = LimbicManager(config, database, event_bus, self.api_client)
+
+        # 初始化用户管理器
+        self.user_manager = UserManager(database)
+
+        # 初始化任务调度器
+        self.scheduler = AsyncIOScheduler()
+
+        # 记录唤醒任务的 ID
+        self.wakeup_job_id = None
+
+        # 睡眠状态标记
+        self.is_sleeping = False
 
         # 注入 Scheduler 和 Agent 自身
         self.tool_manager.add_dependency("agent", self)
@@ -457,7 +457,7 @@ class AutonomousAgent:
             "properties": {
                 "thought": {
                     "type": "string",
-                    "description": "你的思考过程，分析当前状态、系统反馈和下一步计划。必须包含对失败原因的分析（如果有）。"
+                    "description": "你的思考过程，分析当前状态并规划执行。"
                 },
                 "scratchpad": {
                     "type": "object",

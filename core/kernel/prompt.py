@@ -209,7 +209,7 @@ prime_directives:
         elif state.social_satiety < 0.3: mood_tone = "孤独/渴望交流"
 
         return f"""
-## 生理与情绪状态 (Neuro-State)
+## 生理与情绪状态
 当前并非处于无状态，而是拥有模拟的神经化学反应：
 - 整体基调: {mood_tone}
 - 动力与好奇: {state.dopamine:.2f} ({level_desc(state.dopamine, "缺乏动力", "正常", "好奇心强")})
@@ -239,7 +239,7 @@ prime_directives:
         neuro_block = self._get_neuro_context(neuro_state)
 
         monitor_registry.register_text_source(
-            "Cognition", "Nero",
+            "Cognition", "Nero Block",
             lambda: neuro_block
         )
 

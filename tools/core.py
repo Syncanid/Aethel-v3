@@ -352,12 +352,6 @@ async def get_active_adapters(adapters: List[Any]) -> str:
         # 获取类名作为辅助信息
         class_name = adapter.__class__.__name__
 
-        # 尝试获取运行状态 (如果适配器有 is_running 属性)
-        status_suffix = ""
-        if hasattr(adapter, "_running"):
-            status = "运行中" if getattr(adapter, "_running") else "已停止"
-            status_suffix = f" - {status}"
-
-        lines.append(f"{i}. {name.upper()} ({class_name}){status_suffix}")
+        lines.append(f"{i}. {name} ({class_name})")
 
     return "\n".join(lines)

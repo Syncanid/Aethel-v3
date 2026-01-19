@@ -28,7 +28,7 @@ class MonitorRegistry:
 
     def register_metric_source(self, label: str, callback: Callable[[], float], min_val=0.0, max_val=1.0):
         """
-        注册数值类型的数据源 (例如 多巴胺水平, CPU占用)
+        注册数值类型的数据源
         用于显示进度条或仪表盘
         """
         self.plot_sources[label] = {

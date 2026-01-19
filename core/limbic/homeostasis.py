@@ -1,7 +1,9 @@
 # core/limbic/homeostasis.py
+import json
 import logging
 from typing import Tuple, List
 
+from core.gui.monitor_registry import monitor_registry
 from core.limbic.arch import NeuroState, DriveType
 
 logger = logging.getLogger(__name__)
@@ -40,6 +42,21 @@ class HomeostasisSystem:
         if state.dopamine > 0.6 and state.cognitive_energy > 0.6:
             intensity = (state.dopamine - 0.6) / 0.4
             drives.append((DriveType.CURIOSITY, intensity))
+
+        def drives_to_friendly_str(drives: List[Tuple[DriveType, float]]) -> str:
+            labels = {
+                "none": "无驱动力",
+                "social_connection": "社交连接",
+                "cognitive_rest": "认知休息",
+                "curiosity": "好奇心",
+                "security": "安全感"
+            }
+            return "\n".join(f"{labels[drive.value]} ({score:.1%})" for drive, score in drives)
+
+        monitor_registry.register_text_source(
+            "Cognition", "内驱力",
+            lambda: drives_to_friendly_str(drives)
+        )
 
         # 排序取最强驱动力
         if not drives:
