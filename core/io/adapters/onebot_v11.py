@@ -205,9 +205,26 @@ class OneBotV11Adapter(BaseAdapter):
             target_user = action.params.get("user_id")
 
             if target_group:
+                resp = await self.call_api("get_group_list")
+                data = resp['data']
+                groups = []
+                for group in data:
+                    groups.append(str(group["group_id"]))
+                if target_group not in groups:
+                    return ActionResponse(status=ActionStatus.FAILED, message="未知的群聊，请查询群聊列表")
                 api_name = "send_group_msg"
                 params = {"group_id": target_group, "message": msg}
             elif target_user:
+                resp = await self.call_api("get_friend_list")
+                data = resp['data']
+                friends = []
+                self_id = int(self.config.get("system.bot_self_id", 0)) if self.config else 0
+                for friend in data:
+                    if friend["user_id"] == self_id:
+                        continue
+                    friends.append(str(friend["user_id"]))
+                if target_user not in friends:
+                    return ActionResponse(status=ActionStatus.FAILED, message="未知的用户，请查询好友列表或者添加好友")
                 api_name = "send_private_msg"
                 params = {"user_id": target_user, "message": msg}
             else:
@@ -284,7 +301,7 @@ class OneBotV11Adapter(BaseAdapter):
         event = OneBotEvent(
             type=EventType.META,
             detail_type=detail_type,
-            source=EventSource(platform=self.platform_name, user_id="system"),
+            source=EventSource(platform=self.platform_name),
             message=f"OneBot adapter {detail_type}"
         )
         self.event_bus.publish_event(event)

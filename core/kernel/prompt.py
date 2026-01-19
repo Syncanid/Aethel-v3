@@ -64,42 +64,85 @@ prime_directives:
             with open(self.role_yaml_path, "w", encoding="utf-8") as f:
                 f.write(default_yaml)
 
-    def _load_role_yaml(self) -> str | tuple[LiteralString, Any]:
+    def _beautify_key(self, key: str) -> str:
+        return key.replace("_", " ").title()
+
+    def _load_role_yaml(self) -> str | tuple[str, Any]:
         """读取并格式化 YAML 角色卡为中文 System Prompt 段落"""
         try:
             with open(self.role_yaml_path, "r", encoding="utf-8-sig") as f:
-                role_data = yaml.safe_load(f)
+                role_data = yaml.safe_load(f) or {}
         except Exception as e:
             return f"\n[Role YAML Load Error: {e}]\n"
 
-        # 构建可直接拼接的中文段落
+        blocks: list[str] = []
+
+        # ========= Identity =========
         identity = role_data.get("identity", {})
+        if identity:
+            blocks.append("## 核心身份定义")
+            if identity.get("name"):
+                blocks.append(f"- 名称：{identity['name']}")
+            if identity.get("role"):
+                blocks.append(f"- 角色：{identity['role']}")
+            if identity.get("origin"):
+                blocks.append(f"- 来源：{identity['origin']}")
+            if identity.get("prime_objective"):
+                blocks.append(f"- 核心目标：{identity['prime_objective']}")
+
+        # ========= Personality =========
         personality = role_data.get("personality", {})
+        if personality:
+            blocks.append("\n## 性格与表达方式")
+            traits = personality.get("traits", [])
+            if traits:
+                blocks.append("- 性格特征：")
+                for t in traits:
+                    blocks.append(f"  - {t}")
+
+            speaking_style = personality.get("speaking_style", [])
+            if speaking_style:
+                blocks.append("- 语言与表现风格：")
+                for s in speaking_style:
+                    blocks.append(f"  - {s}")
+
+        # ========= Must Rules =========
+        must_rules = role_data.get("must_rules", [])
+        if must_rules:
+            blocks.append("\n## 必须遵守的基本原则")
+            for r in must_rules:
+                blocks.append(f"- {r}")
+
+        # ========= Behavior Constraints =========
+        behavior_constraints = role_data.get("behavior_constraints", {})
+        if behavior_constraints:
+            blocks.append("\n## 行为与对话约束")
+
+            for section_name, rules in behavior_constraints.items():
+                if not rules:
+                    continue
+                blocks.append(f"- {self._beautify_key(section_name)}：")
+                for r in rules:
+                    blocks.append(f"  - {r}")
+
+        # ========= Internal State =========
+        internal_notes = role_data.get("internal_state_note", [])
+        if internal_notes:
+            blocks.append("\n## 内在状态与心理约定")
+            for note in internal_notes:
+                blocks.append(f"- {note}")
+
+        # ========= Facts =========
+        facts = role_data.get("facts", {})
+        if facts:
+            blocks.append("\n## 事实性设定（不可随意篡改）")
+            for k, v in facts.items():
+                blocks.append(f"- {self._beautify_key(k)}：{v}")
+
+        # ========= Prime Directives（兼容旧系统） =========
         directives = role_data.get("prime_directives", [])
-
-        blocks = []
-
-        # Identity
-        blocks.append("## 核心身份定义")
-        blocks.append(f"- 名称: {identity.get('name', '')}")
-        blocks.append(f"- 角色: {identity.get('role', '')}")
-        blocks.append(f"- 来源: {identity.get('origin', '')}")
-        blocks.append(f"- 核心目标: {identity.get('prime_objective', '')}")
-
-        # Personality
-        blocks.append("\n## 性格特征")
-        traits = personality.get("traits", [])
-        if traits:
-            blocks.append("- 特征: " + ", ".join(traits))
-        speaking_style = personality.get("speaking_style", [])
-        if speaking_style:
-            blocks.append("- 语言风格指南:")
-            for s in speaking_style:
-                blocks.append(f"  - {s}")
-
-        # Prime directives
         if directives:
-            blocks.append("\n## 最高指令")
+            blocks.append("\n## 高优先级系统指令")
             for d in directives:
                 blocks.append(f"- {d}")
 

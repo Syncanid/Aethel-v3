@@ -33,7 +33,7 @@ async def send_message(
     Args:
         message: 消息内容。
         target_id: 目标用户ID 或 群组ID。
-        platform: 目标平台 (如 'qq', 'telegram')。
+        platform: 目标平台。
         target_type: 消息类型 ('private', 'group', 'channel')。
     """
 
@@ -95,7 +95,7 @@ async def _dispatch_wake_up(event_bus: EventBus, reason: str):
         type=EventType.NOTICE,  # 使用 Notice 类型
         detail_type="wake_up",
         sub_type="timer",
-        source=EventSource(platform="system", user_id="timer"),
+        source=EventSource(platform="system"),
         message=f"【系统唤醒】: {reason}",
         alt_message=f"【系统唤醒】: {reason}",
         extra={"status": "wake_up"}
@@ -105,12 +105,12 @@ async def _dispatch_wake_up(event_bus: EventBus, reason: str):
 
 @register()
 async def wait(
+        scheduler: AsyncIOScheduler,
+        event_bus: EventBus,
+        agent: AutonomousAgent,
+        reason: str,
         duration: Optional[float] = None,
         until: Optional[str] = None,
-        reason: str = "Timer expired",
-        scheduler: AsyncIOScheduler = None,
-        event_bus: EventBus = None,
-        agent: AutonomousAgent = None,
 ) -> str:
     """
     让系统进入等待/挂起状态。
@@ -118,9 +118,9 @@ async def wait(
     注意：在等待期间，如果有新的用户消息，系统依然会被打断并处理。
 
     Args:
+        reason: 唤醒时的提示信息。
         duration: 等待的秒数 (相对时间)。例如 30.5。
         until: 等待直到具体的日期时间 (绝对时间)。支持 ISO 格式 (如 '2026-01-20 08:00:00')。
-        reason: 唤醒时的提示信息。
     """
 
     # 1. 计算触发时间
@@ -171,10 +171,9 @@ async def wait_forever(
 ) -> str:
     """
     [Control] 进入无限期休眠状态，直到收到外部事件（如用户消息）唤醒。
-    这比 wait(duration) 更适合空闲状态。
 
     Args:
-        reason: 休眠的具体原因（例如："等待用户指令", "任务已完成"）。
+        reason: 休眠的具体原因。
     """
     if agent:
         # 如果存在之前的定时唤醒任务（例如之前的 wait 设置的），则取消它
@@ -225,7 +224,7 @@ class AethelInterface:
         event = OneBotEvent(
             type=type,  # e.g., "message", "notice"
             detail_type=detail_type,
-            source=EventSource(platform="script", user_id="python_interpreter"),
+            source=EventSource(platform="script"),
             message=message,
             alt_message=message,
             extra=kwargs

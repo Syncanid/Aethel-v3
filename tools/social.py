@@ -29,7 +29,8 @@ async def social_register_user(
         user_manager: UserManager
 ) -> str:
     """
-    [主动社交] 将一个新用户录入到你的社交网络中。
+    [主动社交] 将一个新用户录入到你的记忆中。
+    注意！这个工具不会凭空变出用户！
     只有当你觉得这个人“值得长期记住”时才调用。
 
     Args:

@@ -30,7 +30,7 @@ class AutonomousAgent:
         self.prompt_manager = PromptManager(config)
 
         # 初始化记忆组件
-        self.hippocampus = Hippocampus(config, self.api_client, database)
+        self.hippocampus = Hippocampus(config, self.api_client, self.event_bus, database)
         self.vector_store = VectorStore(database, self.api_client)
 
         # 初始化边缘系统
@@ -54,7 +54,7 @@ class AutonomousAgent:
             "current_goal": "",
             "subtasks": [],
             "variables": {},
-            "progress_summary": "All systems initialized."
+            "progress_summary": ""
         }
         self.last_response_content = ""  # 用于死锁检测
 
@@ -156,10 +156,6 @@ class AutonomousAgent:
         self.scheduler.start()
         logger.info("任务调度器已启动")
 
-        # 注册边缘系统心跳任务 (每 5 分钟一次)
-        self.scheduler.add_job(self.limbic.tick, 'interval', minutes=5)
-        logger.info("边缘系统心跳已挂载 (Interval: 5m)")
-
         # 初始化 Social DB
         await self.user_manager.initialize()
 
@@ -181,6 +177,9 @@ class AutonomousAgent:
 
         # 2. 启动海马体后台任务
         asyncio.create_task(self.hippocampus.start())
+
+        # 3. 启动边缘系统后台任务
+        asyncio.create_task(self.limbic.start())
 
         # 3. 注入启动信号
         self.history.append({
@@ -468,19 +467,9 @@ class AutonomousAgent:
                             }
                         },
                         "variables": {"type": "object", "description": "存储临时数据或ID"},
-                        "last_context": {
-                            "type": "object",
-                            "description": "最近的对话上下文（由系统自动注入，请在更新 Scratchpad 时保留此对象，以便工具调用时自动寻址）",
-                            "properties": {
-                                "platform": {"type": "string"},
-                                "type": {"type": "string", "enum": ["private", "group"]},
-                                "id": {"type": "string"}
-                            },
-                            "required": ["platform", "type", "id"]
-                        },
                         "progress_summary": {"type": "string", "description": "简要总结已完成的工作"}
                     },
-                    "required": ["current_goal", "subtasks", "last_context", "progress_summary"]
+                    "required": ["current_goal", "subtasks", "progress_summary"]
                 },
                 "tool_calls": {
                     "type": "array",
@@ -498,8 +487,6 @@ class AutonomousAgent:
             "required": ["thought", "scratchpad", "tool_calls"],
             "additionalProperties": False
         }
-
-        print(self.history)
 
         # 调用 API，同时传入 tools 和 schema
         response = await self.api_client.create_chat_completion(

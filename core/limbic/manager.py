@@ -1,4 +1,5 @@
 # core/limbic/manager.py
+import asyncio
 import json
 import logging
 import time
@@ -37,6 +38,20 @@ class LimbicManager:
         # 内存缓存
         self._state_cache: Optional[NeuroState] = None
 
+        self.is_running = False
+
+    async def start(self):
+        """启动检测循环"""
+        self.is_running = True
+        logger.info("边缘系统已启动...")
+
+        while self.is_running:
+            try:
+                await self._tick()
+            except Exception as e:
+                logger.error(f"边缘系统运行异常: {e}", exc_info=True)
+            await asyncio.sleep(60)  # 每分钟检查一次
+
     async def initialize(self):
         """初始化表结构"""
         async with self.db.get_connection() as conn:
@@ -56,7 +71,6 @@ class LimbicManager:
             await conn.commit()
         # 预加载状态
         await self.get_state()
-        logger.info("边缘系统已初始化")
 
     async def get_state(self) -> NeuroState:
         """获取全局状态"""
@@ -111,7 +125,7 @@ class LimbicManager:
         # 5. 存库
         await self.save_state()
 
-    async def tick(self):
+    async def _tick(self):
         """
         [后台心跳] 代谢 -> 检查驱动 -> 触发
         """
@@ -123,6 +137,8 @@ class LimbicManager:
 
         # 2. 检查内驱力 (Check Drives)
         drive, intensity = self.homeostasis.check_drives(state)
+
+        logger.debug(f"tick limbic: {drive}, {intensity}")
 
         # 3. 产生自发行为 (Emergent Behavior)
         # 阈值：只有驱动力足够强时才打扰主模型
@@ -155,8 +171,7 @@ class LimbicManager:
             detail_type=DetailType.INTERNAL_DRIVE,
             sub_type=drive.value,
             source=EventSource(
-                platform="internal",
-                user_id="limbic_system"
+                platform="internal_limbic",
             ),
             message=f"[SYSTEM_SIGNAL] {hint_text}",
             extra={

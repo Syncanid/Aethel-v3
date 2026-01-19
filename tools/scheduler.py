@@ -17,7 +17,7 @@ async def _send_reminder(event_bus: EventBus, user_id: str, content: str):
         type=EventType.MESSAGE,
         detail_type=DetailType.PRIVATE,
         sub_type="scheduler",
-        source=EventSource(platform="scheduler", user_id="system"),
+        source=EventSource(platform="scheduler"),
         message=f"【提醒】{content}",
         alt_message=f"【提醒】{content}",
         # 可以把目标用户放在 extra 里，或者通过 EventSource.group_id 区分，

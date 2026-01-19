@@ -3,11 +3,13 @@ import asyncio
 import json
 import logging
 import time
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from core.infrastructure.api_client import GenericAPIClient
 from core.infrastructure.config_loader import Config
 from core.infrastructure.database import Database
+from core.io.event_bus import EventBus
+from core.io.event_schema import Action, ActionResponse, EventType, OneBotEvent
 from core.memory.schema import EpisodicMemory, SemanticMemory
 from core.memory.vector_store import VectorStore
 
@@ -15,10 +17,11 @@ logger = logging.getLogger(__name__)
 
 
 class Hippocampus:
-    def __init__(self, config: Config, api_client: GenericAPIClient, database: Database):
+    def __init__(self, config: Config, api_client: GenericAPIClient, event_bus: EventBus, database: Database):
         self.config = config
         self.api_client = api_client
         self.database = database
+        self.event_bus = event_bus
         self.vector_store = VectorStore(database, api_client)
         self.is_running = False
 
@@ -29,7 +32,10 @@ class Hippocampus:
     async def start(self):
         """启动海马体循环"""
         self.is_running = True
-        logger.info("🧠 海马体已启动: 正在监听记忆回响...")
+        logger.info("海马体已启动...")
+
+        self.event_bus.subscribe_event(self.on_event)
+        self.event_bus.subscribe_action(self.on_action)
 
         while self.is_running:
             try:
@@ -37,6 +43,62 @@ class Hippocampus:
             except Exception as e:
                 logger.error(f"海马体运行异常: {e}", exc_info=True)
             await asyncio.sleep(60)  # 每分钟检查一次
+
+    async def on_event(self, event: OneBotEvent):
+        """记录用户发送的消息"""
+        if event.type != EventType.MESSAGE:
+            return
+
+        try:
+            # 提取关键信息
+            role = "user"
+            content = event.alt_message or str(event.message)  # 优先使用纯文本
+            user_id = event.source.user_id
+            group_id = event.source.group_id
+            msg_id = event.extra.get("msg_id", f"evt_{time.time()}")
+
+            # 写入数据库
+            async with self.database.get_connection() as conn:
+                await conn.execute(
+                    """INSERT INTO chat_logs
+                       (msg_id, user_id, group_id, role, content, msg_type, timestamp, raw_data)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (str(msg_id), user_id, group_id, role, content,
+                     event.detail_type, time.time(), json.dumps(event.model_dump()))
+                )
+                await conn.commit()
+
+        except Exception as e:
+            logger.error(f"记录用户消息失败: {e}")
+
+    async def on_action(self, action: Action) -> Optional[ActionResponse]:
+        """记录系统发送的消息"""
+        # 只关心发送消息的动作
+        if action.action not in ["send_message"]:
+            return None
+
+        try:
+            role = "assistant"
+            content = action.params.get("message", "")
+            user_id = action.params.get("user_id", "")
+            group_id = action.params.get("group_id", "")
+            msg_id = f"out_{time.time()}"
+
+            async with self.database.get_connection() as conn:
+                await conn.execute(
+                    """INSERT INTO chat_logs
+                       (msg_id, user_id, group_id, role, content, msg_type, timestamp, raw_data)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (msg_id, user_id, group_id, role, str(content),
+                     "outgoing", time.time(), json.dumps(action.model_dump()))
+                )
+                await conn.commit()
+
+        except Exception as e:
+            logger.error(f"记录系统回复失败: {e}")
+
+        # 返回 None 表示不拦截动作，允许它继续传递给 Adapter
+        return None
 
     async def _run_archival_loop(self):
         """扫描活跃会话并处理"""
