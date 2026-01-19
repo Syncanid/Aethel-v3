@@ -29,6 +29,7 @@ async def send_message(
 ) -> str:
     """
     发送消息。支持指定发送目标（私聊/群组）。
+    发送消息之前必须获取基本信息（平台和用户ID/群组ID）
 
     Args:
         message: 消息内容。
@@ -119,7 +120,7 @@ async def wait(
 
     Args:
         reason: 唤醒时的提示信息。
-        duration: 等待的秒数 (相对时间)。
+        duration: 等待的分钟 (相对时间)。
         until: 等待直到具体的日期时间 (绝对时间)，ISO 格式。
     """
 
@@ -137,10 +138,10 @@ async def wait(
     elif duration is not None:
         if duration <= 0:
             return "错误: 等待时长必须大于 0。"
-        run_date = datetime.datetime.now() + datetime.timedelta(seconds=duration)
+        run_date = datetime.datetime.now() + datetime.timedelta(minutes=duration)
 
     else:
-        return "错误: 必须提供 'duration' (秒) 或 'until' (日期字符串) 其中之一。"
+        return "错误: 必须提供 'duration' (分) 或 'until' (日期字符串) 其中之一。"
 
     # 2. 添加调度任务
     if scheduler and run_date:
@@ -345,13 +346,13 @@ async def get_active_adapters(adapters: List[Any]) -> str:
     [System] 获取当前系统已加载的所有 IO 适配器列表。
     用于检查系统是否正确连接到了各个平台（如 Console, OneBot 等）。
     """
-    lines = ["当前活跃的适配器接口:"]
+    lines = []
     for i, adapter in enumerate(adapters, 1):
         # 获取平台名称 (BaseAdapter 属性)
         name = getattr(adapter, "platform_name", "Unknown")
         # 获取类名作为辅助信息
         class_name = adapter.__class__.__name__
 
-        lines.append(f"{i}. {name} ({class_name})")
+        lines.append(f"{name} ({class_name})")
 
     return "\n".join(lines)

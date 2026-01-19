@@ -98,94 +98,6 @@ class CoreMemoryDialog(QDialog):
 
 
 # --- 标签页组件 ---
-
-class ChatLogTab(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.init_ui()
-
-    def init_ui(self):
-        layout = QVBoxLayout()
-
-        # 顶部工具栏
-        toolbar = QHBoxLayout()
-        self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("搜索内容或角色...")
-        self.search_input.returnPressed.connect(self.load_data)
-
-        refresh_btn = QPushButton("刷新")
-        refresh_btn.clicked.connect(self.load_data)
-
-        toolbar.addWidget(QLabel("搜索:"))
-        toolbar.addWidget(self.search_input)
-        toolbar.addWidget(refresh_btn)
-
-        # 表格
-        self.table = QTableWidget()
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["ID", "时间", "角色", "内容", "Seq"])
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)  # 只读
-
-        layout.addLayout(toolbar)
-        layout.addWidget(self.table)
-        self.setLayout(layout)
-
-        # 初始加载
-        self.load_data()
-
-    def load_data(self):
-        search_term = self.search_input.text().strip()
-        query = "SELECT id, timestamp, role, content, message_seq FROM chat_logs"
-        params = []
-
-        if search_term:
-            query += " WHERE content LIKE ? OR role LIKE ?"
-            params = [f"%{search_term}%", f"%{search_term}%"]
-
-        query += " ORDER BY id DESC LIMIT 100"
-
-        try:
-            with DBConnection(DB_PATH) as conn:
-                cursor = conn.execute(query, params)
-                rows = cursor.fetchall()
-
-                self.table.setRowCount(0)
-                for row in rows:
-                    row_idx = self.table.rowCount()
-                    self.table.insertRow(row_idx)
-
-                    # 格式化时间
-                    try:
-                        ts_str = datetime.fromtimestamp(row["timestamp"]).strftime('%Y-%m-%d %H:%M:%S')
-                    except:
-                        ts_str = str(row["timestamp"])
-
-                    self.table.setItem(row_idx, 0, QTableWidgetItem(str(row["id"])))
-                    self.table.setItem(row_idx, 1, QTableWidgetItem(ts_str))
-                    self.table.setItem(row_idx, 2, QTableWidgetItem(row["role"]))
-                    self.table.setItem(row_idx, 3, QTableWidgetItem(row["content"]))
-                    self.table.setItem(row_idx, 4, QTableWidgetItem(str(row["message_seq"])))
-
-                    # 颜色区分
-                    if row["role"] == "user":
-                        color = QColor("#E3F2FD")  # 浅蓝
-                    elif row["role"] == "assistant":
-                        color = QColor("#F1F8E9")  # 浅绿
-                    elif row["role"] == "system":
-                        color = QColor("#FFF3E0")  # 浅橙
-                    else:
-                        color = QColor("#FFFFFF")
-
-                    for col in range(5):
-                        item = self.table.item(row_idx, col)
-                        item.setBackground(QBrush(color))
-
-        except Exception as e:
-            logger.error(f"加载聊天记录失败: {e}")
-
-
 class CoreMemoryTab(QWidget):
     def __init__(self):
         super().__init__()
@@ -447,7 +359,6 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "警告", f"数据库文件未找到: {DB_PATH}\n请确认当前运行目录正确。")
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(ChatLogTab(), "📜 聊天记录")
         self.tabs.addTab(CoreMemoryTab(), "💎 核心记忆 (KV)")
 
         if HAS_CHROMA:

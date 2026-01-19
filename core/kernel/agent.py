@@ -15,6 +15,7 @@ from core.io.event_schema import OneBotEvent, Action, DetailType, EventType
 from core.kernel.prompt import PromptManager
 from core.limbic.manager import LimbicManager
 from core.memory.hippocampus import Hippocampus
+from core.memory.infinite_context import InfiniteContextManager
 from core.memory.vector_store import VectorStore
 from core.social.manager import UserManager
 from core.tool_manager.aggregator import ToolManager
@@ -39,6 +40,7 @@ class AutonomousAgent:
             "progress_summary": ""
         }
         self.last_response_content = ""  # 用于死锁检测
+        self.last_observation_text = None
 
         # --- 初始化工具管理器 (注入依赖) ---
         self.tool_manager = ToolManager(
@@ -61,6 +63,9 @@ class AutonomousAgent:
 
         # 初始化任务调度器
         self.scheduler = AsyncIOScheduler()
+
+        # 初始化无限上下文管理器
+        self.context_manager = InfiniteContextManager(config, self.api_client)
 
         # 记录唤醒任务的 ID
         self.wakeup_job_id = None
@@ -118,10 +123,8 @@ class AutonomousAgent:
         此函数作为 LLM 调用前的一个预处理，基于对中英文和图片Token的估算。
         """
         # 尝试从配置获取上下文限制
-        TOKEN_LIMIT_APPROX = self.config.get("llm", {}).get("context_window", 8192)
-
-        # 预留 1000 token 给回复
-        SAFE_LIMIT = TOKEN_LIMIT_APPROX - 1000
+        TOKEN_LIMIT_APPROX = 8192
+        SAFE_LIMIT = TOKEN_LIMIT_APPROX - 500
 
         current_estimated_tokens = 0
 
@@ -167,14 +170,9 @@ class AutonomousAgent:
         # 初始化边缘系统数据库
         await self.limbic.initialize()
 
-        # 3. 初始 Prompt 注入检索到的记忆 (RAG)
-        # 简单起见，这里先检索 "Context" 相关的
-        mems = await self.vector_store.search_memory("重要信息", "system_boot")
-        mem_context = "\n".join(mems) if mems else "暂无记忆"
-
         # 1. 注入初始系统上下文
         system_prompt = self.prompt_manager.get_system_prompt()
-        self.history.append({"role": "system", "content": system_prompt + f"\n\n# Memory Context\n{mem_context}"})
+        self.history.append({"role": "system", "content": system_prompt})
 
         # 2. 启动海马体后台任务
         asyncio.create_task(self.hippocampus.start())
@@ -222,21 +220,29 @@ class AutonomousAgent:
 
                 # --- B. 思考与决策阶段 (Thought) ---
 
+                # [Infinite Context] 智能压缩上下文
+                await self.context_manager.compress_if_needed(self.history)
                 # [v1 移植] 上下文修剪
                 self._prune_context()
+
+                # 主动记忆检索 (RAG)
+                retrieved_memories = await self._active_retrieval()
 
                 # 动态生成 System Prompt
                 # 1. 获取当前神经状态
                 current_neuro_state = await self.limbic.get_state()
 
                 # 2. 生成带有状态描述的 Prompt
-                system_prompt_base = self.prompt_manager.get_system_prompt(neuro_state=current_neuro_state)
+                system_prompt_base = self.prompt_manager.get_system_prompt(
+                    neuro_state=current_neuro_state,
+                    memory_context=retrieved_memories
+                )
 
                 # 3. 附加 Scratchpad
                 scratchpad_dump = json.dumps(self.scratchpad, indent=2, ensure_ascii=False)
 
                 monitor_registry.register_text_source(
-                    "Cognition", "Scratchpad", lambda: scratchpad_dump
+                    "认知", "Scratchpad", lambda: scratchpad_dump
                 )
 
                 final_system_prompt = (
@@ -247,7 +253,7 @@ class AutonomousAgent:
                 )
 
                 monitor_registry.register_text_source(
-                    "System", "System Prompt",
+                    "系统", "System Prompt",
                     lambda: final_system_prompt
                 )
 
@@ -256,6 +262,9 @@ class AutonomousAgent:
                     self.history[0]["content"] = final_system_prompt
                 else:
                     self.history.insert(0, {"role": "system", "content": final_system_prompt})
+
+                with open("data/messages_in_memory.txt", "w", encoding="utf-8") as f:
+                    f.write(json.dumps(self.history, ensure_ascii=False, indent=4))
 
                 # 调用 LLM
                 response_msg = await self._call_llm()
@@ -310,7 +319,8 @@ class AutonomousAgent:
                     ))
 
                 # 存入历史
-                self.history.append({"role": "assistant", "content": content_str})
+                self.history.append({"role": "assistant", "content": json.dumps(json.loads(content_str),
+                                                                                separators=(',', ':'), ensure_ascii=False)})
 
                 # 3. 处理并行工具调用
                 if tool_calls:
@@ -369,6 +379,7 @@ class AutonomousAgent:
         if event.type == EventType.MESSAGE and isinstance(event.message, str):
             # 异步调用，不阻塞主流程太多
             asyncio.create_task(self.limbic.process_stimulus(event.message))
+            self.last_observation_text = event.message
 
         # 自动捕获用户
         # 尝试从 source 中获取用户信息
@@ -376,7 +387,6 @@ class AutonomousAgent:
         adapter_names = []
         for i, adapter in enumerate(adapters, 1):
             adapter_names.append(getattr(adapter, "platform_name", "Unknown"))
-
 
         if event.source.user_id and event.source.platform in adapter_names:
             platform = event.source.platform
@@ -426,11 +436,11 @@ class AutonomousAgent:
         # [特殊处理] 如果是内部驱动信号，添加高亮提示
         prefix = ""
         if event.detail_type == DetailType.INTERNAL_DRIVE:
-            prefix = "[INTERNAL SIGNAL - URGENT]\n"
+            prefix = "[紧急]\n"
             # 强制唤醒
             self.is_sleeping = False
 
-        context_msg = f"{prefix}[Event Received]\n{json.dumps(event_data, ensure_ascii=False)}"
+        context_msg = f"{prefix}{json.dumps(event_data, ensure_ascii=False)}"
 
         # 3. 更新 Scratchpad 上下文 (如果是消息事件)
         if event.source.platform != "internal":
@@ -447,6 +457,45 @@ class AutonomousAgent:
         self.history.append({"role": "user", "content": context_msg})
         logger.info(f"Event Ingested: {event.type}.{event.detail_type}")
 
+    async def _active_retrieval(self) -> List[str]:
+        """主动记忆检索逻辑"""
+        # 1. 获取当前交互对象的 UID
+        interactor = self.scratchpad.get("current_interactor", {})
+        uid = interactor.get("uid", "global")
+
+        # 2. 构建查询语句 (Query)
+        # 策略：结合 "当前正在做的事(Goal)" 和 "刚才听到的话(Observation)"
+        query_parts = []
+
+        current_goal = self.scratchpad.get("current_goal", "")
+        if current_goal:
+            query_parts.append(f"关注点: {current_goal}")
+
+        if self.last_observation_text:
+            query_parts.append(f"上下文: {self.last_observation_text}")
+
+        if not query_parts:
+            # 如果什么都没有，就不浪费 Token 去搜了
+            return []
+
+        query = " ".join(query_parts)
+
+        try:
+            # 调用向量存储进行检索
+            # limit=3 避免上下文过长，只取最相关的
+            logger.debug(f"🔍 执行主动记忆检索: {query[:50]}... (UID: {uid})")
+            memories = await self.vector_store.search_memory(query, uid, limit=3)
+            if memories:
+                logger.info(f"📚 检索到 {len(memories)} 条相关记忆")
+                monitor_registry.register_text_source(
+                    "认知", "主动记忆",
+                    lambda: "\n".join(memories)
+                )
+            return memories
+        except Exception as e:
+            logger.warning(f"记忆检索异常: {e}")
+            return []
+
     async def _call_llm(self) -> Dict[str, Any]:
         """封装 API 调用"""
         schemas = self.tool_manager.get_tool_schemas()
@@ -457,16 +506,15 @@ class AutonomousAgent:
             "properties": {
                 "thought": {
                     "type": "string",
-                    "description": "你的思考过程，分析当前状态并规划执行。"
+                    "description": "思考过程和行动规划。"
                 },
                 "scratchpad": {
                     "type": "object",
-                    "description": "一个用于追踪任务状态、变量和进度的结构化工作区。",
                     "properties": {
-                        "current_goal": {"type": "string", "description": "当前正在执行的具体目标"},
+                        "current_goal": {"type": "string", "description": "当前目标"},
                         "subtasks": {
                             "type": "array",
-                            "description": "为实现目标而设定的子任务列表。",
+                            "description": "任务列表。",
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -477,14 +525,13 @@ class AutonomousAgent:
                                 "required": ["id", "desc", "status"]
                             }
                         },
-                        "variables": {"type": "object", "description": "存储临时数据或ID"},
-                        "progress_summary": {"type": "string", "description": "简要总结已完成的工作"}
+                        "variables": {"type": "object", "description": "临时数据或ID"},
+                        "progress_summary": {"type": "string", "description": "已完成的工作"}
                     },
                     "required": ["current_goal", "subtasks", "progress_summary"]
                 },
                 "tool_calls": {
                     "type": "array",
-                    "description": "需要执行的工具列表。",
                     "items": {
                         "type": "object",
                         "properties": {

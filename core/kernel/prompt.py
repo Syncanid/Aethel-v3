@@ -4,7 +4,7 @@ import os
 import platform
 import sys
 import time
-from typing import Any, Optional
+from typing import Any, Optional, List
 
 import yaml
 from typing_extensions import LiteralString
@@ -205,6 +205,7 @@ prime_directives:
         mood_tone = "平静"
         if state.dopamine > 0.7: mood_tone = "兴奋/充满动力"
         elif state.cortisol > 0.6: mood_tone = "焦虑/压力大"
+        elif state.oxytocin > 0.7: mood_tone = "温情/充满信任"  # [新增] 高依恋状态
         elif state.serotonin > 0.7: mood_tone = "满足/安详"
         elif state.social_satiety < 0.3: mood_tone = "孤独/渴望交流"
 
@@ -215,13 +216,30 @@ prime_directives:
 - 动力与好奇: {state.dopamine:.2f} ({level_desc(state.dopamine, "缺乏动力", "正常", "好奇心强")})
 - 压力水平: {state.cortisol:.2f} ({level_desc(state.cortisol, "放松", "适中", "高度紧张")})
 - 情绪稳定度: {state.serotonin:.2f}
+- 依恋与信任: {state.oxytocin:.2f} ({level_desc(state.oxytocin, "疏离/冷淡", "友善", "深层依恋")})
 - 社交饱腹感: {state.social_satiety:.2f} ({level_desc(state.social_satiety, "极度孤独", "正常", "充实")})
 - 认知能量: {state.cognitive_energy:.2f} ({level_desc(state.cognitive_energy, "疲劳", "尚可", "精力充沛")})
 
-*指令*: 请根据上述状态微调你的回复语气。例如压力大时更简短防御，兴奋时更发散主动，孤独时更热情。
+*指令*: 请根据上述状态微调你的回复语气。
+- 高多巴胺时：更发散、主动、幽默。
+- 高皮质醇时：更简短、防御、寻求确认。
+- 高催产素时：更温柔、使用情感词汇、表达关心与共情。
+- 低社交饱腹感时：表现出对互动的渴望。
 """
 
-    def get_system_prompt(self, neuro_state: Optional[NeuroState] = None) -> str:
+    def _get_memory_context(self, memories: List[str]) -> str:
+        """[新增] 格式化检索到的记忆块"""
+        if not memories:
+            return ""
+
+        mem_str = "\n".join(memories)
+        return f"""
+## 相关记忆回溯 (Active Recall)
+系统根据当前上下文关联到了以下历史记忆，请利用这些信息保持对话的连贯性和个性化：
+{mem_str}
+"""
+
+    def get_system_prompt(self, neuro_state: Optional[NeuroState] = None, memory_context: List[str] = None) -> str:
         """获取 System Prompt"""
         try:
             with open(self.prompt_path, "r", encoding="utf-8-sig") as f:
@@ -237,11 +255,12 @@ prime_directives:
         system_block = self._get_system_context()
         time_block = self._get_time_context()
         neuro_block = self._get_neuro_context(neuro_state)
+        memory_block = self._get_memory_context(memory_context)
 
         monitor_registry.register_text_source(
-            "Cognition", "Nero Block",
-            lambda: neuro_block
+            "生理指标", "注入",
+            lambda: neuro_block.strip()
         )
 
         # 合并输出
-        return "\n".join([self.role, base_prompt, system_block, time_block, neuro_block])
+        return "\n".join([self.role, base_prompt, system_block, time_block, neuro_block, memory_block])

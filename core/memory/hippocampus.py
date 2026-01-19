@@ -80,7 +80,6 @@ class Hippocampus:
         # 2. 加入缓冲区
         if new_msgs:
             self.buffer.extend(new_msgs)
-            logger.debug(f"海马体捕获 {len(new_msgs)} 条新消息")
 
         # 3. 检查触发条件
         should_archive = False

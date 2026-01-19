@@ -54,7 +54,7 @@ class HomeostasisSystem:
             return "\n".join(f"{labels[drive.value]} ({score:.1%})" for drive, score in drives)
 
         monitor_registry.register_text_source(
-            "Cognition", "内驱力",
+            "生理指标", "内驱力",
             lambda: drives_to_friendly_str(drives)
         )
 

@@ -171,7 +171,7 @@ class VectorStore:
                     metadatas=[metadata],
                     ids=[str(uuid.uuid4())]
                 )
-                logger.debug(f"向量记忆已保存: {memory.content[:20]}...")
+                logger.debug(f"向量记忆已保存: {memory.content}")
 
         except Exception as e:
             logger.error(f"向量存储失败: {e}", exc_info=True)

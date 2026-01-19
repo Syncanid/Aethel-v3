@@ -141,14 +141,12 @@ class LimbicManager:
         # 2. 检查内驱力
         drive, intensity = self.homeostasis.check_drives(state)
 
-        logger.debug(f"tick limbic: {drive}, {intensity}")
-
-        monitor_registry.register_metric_source("Dopamine (Motivation)", lambda: state.dopamine)
-        monitor_registry.register_metric_source("Serotonin (Satisfaction)", lambda: state.serotonin)
-        monitor_registry.register_metric_source("Cortisol (Stress)", lambda: state.cortisol)
-        monitor_registry.register_metric_source("Oxytocin (Attachment)", lambda: state.oxytocin)
-        monitor_registry.register_metric_source("Cognitive Energy", lambda: state.cognitive_energy)
-        monitor_registry.register_metric_source("Social Satiety", lambda: state.social_satiety)
+        monitor_registry.register_metric_source("动力与好奇", lambda: state.dopamine)
+        monitor_registry.register_metric_source("情绪稳定度", lambda: state.serotonin)
+        monitor_registry.register_metric_source("压力水平", lambda: state.cortisol)
+        monitor_registry.register_metric_source("依恋与信任", lambda: state.oxytocin)
+        monitor_registry.register_metric_source("认知能量", lambda: state.cognitive_energy)
+        monitor_registry.register_metric_source("社交饱腹感", lambda: state.social_satiety)
 
         # 3. 产生自发行为
         # 阈值：只有驱动力足够强时才打扰主模型

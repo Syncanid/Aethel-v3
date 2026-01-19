@@ -32,7 +32,7 @@ class MonitorWindow(QMainWindow):
         main_layout = QHBoxLayout(central_widget)
 
         # === 左侧：数值监控 (Limbic System & Metrics) ===
-        left_panel = QGroupBox("生理指标 (Metrics)")
+        left_panel = QGroupBox("生理指标")
         left_layout = QVBoxLayout()
         self.metrics_container = QWidget()
         self.metrics_layout = QVBoxLayout(self.metrics_container)

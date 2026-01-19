@@ -15,7 +15,7 @@ async def advanced_think(
         api_client: GenericAPIClient,
         tool_manager: Any,
         goal: str,
-        mode: Literal["plan", "reflect", "decompose", "validate", "brainstorm"] = "plan",
+        mode: Literal["plan", "reflect", "decompose", "validate", "brainstorm"],
         context: Optional[str] = None,
         constraints: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
@@ -28,9 +28,6 @@ async def advanced_think(
         mode: 思考模式 ("plan"=规划, "reflect"=反思, "decompose"=拆解, "validate"=验证, "brainstorm"=头脑风暴)。
         context: 相关的上下文信息或背景数据。
         constraints: 思考过程需遵守的约束条件列表。
-
-    Returns:
-        包含步骤 (steps)、原理 (rationale) 和置信度 (confidence) 的结构化字典。
     """
 
     # --- 0. 获取当前环境真实可用的工具列表 ---
@@ -194,16 +191,13 @@ async def groundbreaking_analysis(
         event_bus: EventBus
 ) -> Dict[str, Any]:
     """
-    [Cognition] 开创性分析工具 (Groundbreaking Analysis)。
+    [Cognition] 开创性分析工具。
     当你发现自己陷入重复思考、无法推进任务、或者不知道下一步该做什么时，必须调用此工具。
-    它会帮助你跳出当前的思维定势，进行深度的根本原因分析 (Root Cause Analysis)，并提供创新性的解决方案。
+    它会帮助你跳出当前的思维定势，进行深度的根本原因分析，并提供创新性的解决方案。
 
     Args:
-        problem_statement: 当前遇到的核心障碍或死锁原因（例如：“我一直在检查状态但没有实际进展”）。
+        problem_statement: 当前遇到的核心障碍或死锁原因。
         context: 相关的背景信息或之前的尝试。
-
-    Returns:
-        包含 'diagnosis' (诊断), 'lateral_thinking' (侧向思维), 'actionable_plan' (行动计划) 的结构化数据。
     """
 
     # 广播开始分析的信号

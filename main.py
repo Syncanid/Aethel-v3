@@ -94,7 +94,7 @@ class AethelSystem:
         """注册 GUI 监控源"""
         # 注册配置信息
         monitor_registry.register_text_source(
-            "System", "Configuration",
+            "系统", "配置",
             lambda: self.config.all
         )
 
