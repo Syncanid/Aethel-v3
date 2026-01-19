@@ -1,4 +1,5 @@
 # core/infrastructure/api_client.py
+import json
 import logging
 from typing import Dict, Optional
 
@@ -22,7 +23,7 @@ class GenericAPIClient:
 
     def _setup_proxy(self):
         self.proxy = None
-        if self.config.get("proxy.enabled"):
+        if self.config.get("proxy.enabled_llm"):
             self.proxy = self.config.get("proxy.https") or self.config.get("proxy.http")
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -74,6 +75,7 @@ class GenericAPIClient:
                 return await resp.json()
         except Exception as e:
             logger.error(f"LLM API 调用失败: {e}")
+            logger.debug(json.dumps(payload, ensure_ascii=False))
 
             # 发生错误时，强制关闭并重置 session
             # 这样下一次重试时会创建一个全新的连接，避免 WinError 10053 复用死连接

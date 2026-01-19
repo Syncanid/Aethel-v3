@@ -18,6 +18,7 @@ llm:
 
 proxy:
   enabled: false
+  enabled_llm: false
   http: ""
   https: ""
 

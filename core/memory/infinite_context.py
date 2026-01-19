@@ -14,7 +14,7 @@ class InfiniteContextManager:
         self.config = config
         self.api_client = api_client
         # 从配置读取阈值，默认上下文窗口的 75% 触发压缩
-        self.max_tokens = self.config.get("llm.context_window", 8192)
+        self.max_tokens = self.config.get("llm.model_context", 16384)
         self.trigger_threshold = self.max_tokens * 0.75
 
         # 压缩提示词 (参考 ChatLuna)

@@ -253,11 +253,3 @@ async def get_group_members(ob_adapter: OneBotV11Adapter, group_id: str) -> List
             "is_robot": member["is_robot"],
         })
     return members
-
-
-@register()
-async def add_friend(ob_adapter: OneBotV11Adapter, user_id: str, comment: str = "") -> dict:
-    """加好友请求"""
-    payload = {"user_id": user_id, "comment": comment}
-    resp = await ob_adapter.call_api("add_friend", payload)
-    return resp['data']

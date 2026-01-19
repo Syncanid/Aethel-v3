@@ -123,7 +123,7 @@ class AutonomousAgent:
         此函数作为 LLM 调用前的一个预处理，基于对中英文和图片Token的估算。
         """
         # 尝试从配置获取上下文限制
-        TOKEN_LIMIT_APPROX = 8192
+        TOKEN_LIMIT_APPROX = self.config.get("llm.model_context", 16384)
         SAFE_LIMIT = TOKEN_LIMIT_APPROX - 500
 
         current_estimated_tokens = 0
