@@ -56,9 +56,12 @@ class HomeostasisSystem:
             state.cognitive_energy = max(0.0, state.cognitive_energy - 0.1)
 
         elif action_type == "chat":
-            # 聊天恢复社交饱腹感，但微耗能量
-            state.social_satiety = min(1.0, state.social_satiety + 0.3)
+            # 仅消耗能量，不增加社交饱腹感（因为自言自语不能缓解孤独）
             state.cognitive_energy = max(0.0, state.cognitive_energy - 0.02)
+
+        elif action_type == "receive_message":
+            # 恢复社交饱腹感
+            state.social_satiety = min(1.0, state.social_satiety + 0.3)
 
         elif action_type == "rest":
             # 休息快速回能

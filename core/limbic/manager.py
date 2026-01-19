@@ -5,11 +5,13 @@ import logging
 import time
 from typing import Optional
 
+from core.gui.monitor_registry import monitor_registry
 from core.infrastructure.api_client import GenericAPIClient
 from core.infrastructure.config_loader import Config
 from core.infrastructure.database import Database
 from core.io.event_bus import EventBus
 from core.io.event_schema import OneBotEvent, EventSource, EventType, DetailType
+from core.limbic import homeostasis
 from core.limbic.appraisal import AppraisalSystem
 from core.limbic.arch import NeuroState, DriveType
 from core.limbic.chemistry import NeuroChemistry
@@ -119,8 +121,9 @@ class LimbicManager:
 
         # 3. 消耗认知资源 (思考)
         self.homeostasis.consume_resource(state, "complex_reasoning")
+
         # 4. 恢复社交饱腹感 (因为有人说话了)
-        self.homeostasis.consume_resource(state, "chat")
+        self.homeostasis.consume_resource(state, "receive_message")
 
         # 5. 存库
         await self.save_state()
@@ -132,15 +135,22 @@ class LimbicManager:
         now = time.time()
         state = await self.get_state()
 
-        # 1. 代谢 (Metabolize)
+        # 1. 代谢
         self.chemistry.metabolize(state, now)
 
-        # 2. 检查内驱力 (Check Drives)
+        # 2. 检查内驱力
         drive, intensity = self.homeostasis.check_drives(state)
 
-        logger.debug(f"tick limbic: {drive}, {intensity}")
+        logger.debug(f"tick limbic: {drive}, {intensity}\n{state}")
 
-        # 3. 产生自发行为 (Emergent Behavior)
+        monitor_registry.register_metric_source("Dopamine (Motivation)", lambda: state.dopamine)
+        monitor_registry.register_metric_source("Serotonin (Satisfaction)", lambda: state.serotonin)
+        monitor_registry.register_metric_source("Cortisol (Stress)", lambda: state.cortisol)
+        monitor_registry.register_metric_source("Oxytocin (Attachment)", lambda: state.oxytocin)
+        monitor_registry.register_metric_source("Cognitive Energy", lambda: state.cognitive_energy)
+        monitor_registry.register_metric_source("Social Satiety", lambda: state.social_satiety)
+
+        # 3. 产生自发行为
         # 阈值：只有驱动力足够强时才打扰主模型
         if intensity > 0.7:
             await self._trigger_proactive_behavior(drive, intensity)

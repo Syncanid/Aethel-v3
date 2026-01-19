@@ -6,6 +6,7 @@ from typing import List, Dict, Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from core.gui.monitor_registry import monitor_registry
 from core.infrastructure.api_client import GenericAPIClient
 from core.infrastructure.config_loader import Config
 from core.infrastructure.database import Database
@@ -234,11 +235,20 @@ class AutonomousAgent:
                 # 3. 附加 Scratchpad
                 scratchpad_dump = json.dumps(self.scratchpad, indent=2, ensure_ascii=False)
 
+                monitor_registry.register_text_source(
+                    "Cognition", "Scratchpad", lambda: scratchpad_dump
+                )
+
                 final_system_prompt = (
                     f"{system_prompt_base}\n\n"
-                    f"## 🧠 当前认知状态 (Scratchpad)\n"
+                    f"## Scratchpad\n"
                     f"这是你必须维护的内部状态，每次响应必须更新此状态：\n"
                     f"{scratchpad_dump}"
+                )
+
+                monitor_registry.register_text_source(
+                    "System", "System Prompt",
+                    lambda: final_system_prompt
                 )
 
                 # 更新历史记录中的 System Prompt
@@ -447,20 +457,21 @@ class AutonomousAgent:
             "properties": {
                 "thought": {
                     "type": "string",
-                    "description": "分析当前状态、系统反馈和下一步计划。必须包含对失败原因的分析（如果有）。"
+                    "description": "你的思考过程，分析当前状态、系统反馈和下一步计划。必须包含对失败原因的分析（如果有）。"
                 },
                 "scratchpad": {
                     "type": "object",
-                    "description": "更新认知状态。这是你记忆当前任务进度的唯一方式。",
+                    "description": "一个用于追踪任务状态、变量和进度的结构化工作区。",
                     "properties": {
                         "current_goal": {"type": "string", "description": "当前正在执行的具体目标"},
                         "subtasks": {
                             "type": "array",
+                            "description": "为实现目标而设定的子任务列表。",
                             "items": {
                                 "type": "object",
                                 "properties": {
                                     "id": {"type": "integer"},
-                                    "desc": {"type": "string"},
+                                    "description": {"type": "string"},
                                     "status": {"type": "string", "enum": ["pending", "working", "done", "failed"]}
                                 },
                                 "required": ["id", "desc", "status"]

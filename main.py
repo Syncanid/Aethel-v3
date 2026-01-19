@@ -3,7 +3,8 @@ import asyncio
 import logging
 import signal
 import sys
-from typing import List
+import threading
+from typing import List, Optional
 
 # --- 基础设施层 ---
 from core.infrastructure.config_loader import Config
@@ -15,6 +16,9 @@ from core.io.adapters.onebot_v11 import OneBotV11Adapter
 from core.io.event_bus import EventBus
 # --- 认知内核层 ---
 from core.kernel.agent import AutonomousAgent
+
+from core.gui.monitor_registry import monitor_registry
+from core.gui.dashboard import run_gui
 
 # --- 装饰 ---
 BANNER = r"""
@@ -31,8 +35,8 @@ logger = logging.getLogger("System")
 
 class AethelSystem:
     def __init__(self):
-        self.loop = asyncio.get_running_loop()
-        self.shutdown_event = asyncio.Event()
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
+        self.shutdown_event: Optional[asyncio.Event] = None
         self.tasks: List[asyncio.Task] = []
 
         # 组件引用
@@ -40,12 +44,15 @@ class AethelSystem:
         self.db = None
         self.bus = None
         self.agent = None
+        self.recorder = None
         self.adapters = []
-        self.web_server = None
 
     async def bootstrap(self):
         """系统引导程序"""
         print(BANNER)
+
+        self.loop = asyncio.get_running_loop()
+        self.shutdown_event = asyncio.Event()
 
         # 1. 加载配置
         self.config = Config()
@@ -67,17 +74,29 @@ class AethelSystem:
         self.agent = AutonomousAgent(self.config, self.bus, self.db)
 
         # 6. 加载适配器 (感官)
-        # 控制台适配器 (始终启用)
         console_adapter = ConsoleAdapter(self.bus)
         self.adapters.append(console_adapter)
 
         # OneBot v11 适配器
         ob_adapter = OneBotV11Adapter(self.bus, self.config)
         self.adapters.append(ob_adapter)
-        self.agent.tool_manager.add_dependency("ob_adapter", ob_adapter)
 
+        # 依赖注入
+        self.agent.tool_manager.add_dependency("ob_adapter", ob_adapter)
         self.agent.tool_manager.add_dependency("adapters", self.adapters)
+
+        # === 注册 GUI 监控点 ===
+        self._register_monitors()
+
         logger.info("系统组件初始化完成。")
+
+    def _register_monitors(self):
+        """注册 GUI 监控源"""
+        # 注册配置信息
+        monitor_registry.register_text_source(
+            "System", "Configuration",
+            lambda: self.config.all
+        )
 
     async def start(self):
         """启动所有服务"""
@@ -99,8 +118,8 @@ class AethelSystem:
 
     async def shutdown(self):
         """优雅退出流程"""
-        if self.shutdown_event.is_set():
-            return  # 避免重复调用
+        if not self.shutdown_event or self.shutdown_event.is_set():
+            return
 
         logger.warning("正在启动优雅退出流程...")
         self.shutdown_event.set()
@@ -115,49 +134,62 @@ class AethelSystem:
             logger.info("正在等待后台任务终止...")
             await asyncio.gather(*self.tasks, return_exceptions=True)
 
-        # 3. 关闭数据库连接
-        if self.db:
-            # 如果需要显示关闭
-            pass
-
-        # 4. 关闭 API Client
+        # 3. 关闭 API Client
         if self.agent and self.agent.api_client:
             await self.agent.api_client.close()
 
         logger.info("系统已完全关闭。再见。")
 
 
-async def main():
-    system = AethelSystem()
-
-    # 注册信号处理 (仅在非 Windows 平台)
-    if sys.platform != 'win32':
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, lambda: asyncio.create_task(system.shutdown()))
-    else:
-        logger.debug("Windows 环境检测：使用 KeyboardInterrupt 进行退出处理")
-
+def start_backend_thread(loop, system):
+    """在子线程中运行 asyncio 事件循环"""
+    asyncio.set_event_loop(loop)
     try:
-        await system.bootstrap()
-        await system.start()
+        loop.run_until_complete(system.bootstrap())
+        loop.run_until_complete(system.start())
     except asyncio.CancelledError:
-        # 正常退出信号
         pass
     except Exception as e:
-        logger.critical(f"系统发生致命错误: {e}", exc_info=True)
+        logger.critical(f"后端线程异常: {e}", exc_info=True)
     finally:
-        # 无论如何（包括 Windows Ctrl+C），都确保执行关闭逻辑
-        await system.shutdown()
+        # 确保 shutdown 被调用
+        try:
+            loop.run_until_complete(system.shutdown())
+        except:
+            pass
+        loop.close()
 
 
 if __name__ == "__main__":
-    # Windows 兼容性设置
+    # Windows 兼容性
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
+    # 1. 创建 System 实例
+    system = AethelSystem()
+
+    # 2. 创建新的事件循环
+    new_loop = asyncio.new_event_loop()
+
+    # 3. 在子线程启动后端
+    t = threading.Thread(target=start_backend_thread, args=(new_loop, system), daemon=True)
+    t.start()
+
+    print(">>> 正在启动 GUI 监控终端 (关闭窗口以退出系统) <<<")
+
+    # 4. 在主线程运行 GUI (阻塞直到窗口关闭)
     try:
-        asyncio.run(main())
+        exit_code = run_gui()
     except KeyboardInterrupt:
-        # Windows 下 Ctrl+C 会抛出此异常，但在 main() 的 finally 中已经处理了 shutdown
-        pass
+        exit_code = 0
+    except Exception as e:
+        print(f"GUI Error: {e}")
+        exit_code = 1
+
+    # 5. 退出处理
+    print("正在停止后台服务...")
+    if new_loop.is_running():
+        asyncio.run_coroutine_threadsafe(system.shutdown(), new_loop)
+
+    t.join(timeout=3)
+    sys.exit(exit_code)

@@ -9,6 +9,7 @@ from typing import Any, Optional
 import yaml
 from typing_extensions import LiteralString
 
+from core.gui.monitor_registry import monitor_registry
 from core.infrastructure.config_loader import Config
 from core.limbic.arch import NeuroState
 
@@ -236,6 +237,11 @@ prime_directives:
         system_block = self._get_system_context()
         time_block = self._get_time_context()
         neuro_block = self._get_neuro_context(neuro_state)
+
+        monitor_registry.register_text_source(
+            "Cognition", "Nero",
+            lambda: neuro_block
+        )
 
         # 合并输出
         return "\n".join([self.role, base_prompt, system_block, time_block, neuro_block])
