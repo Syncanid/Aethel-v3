@@ -123,11 +123,13 @@ class KnowledgeIngestor:
                                 "description": "Tags for indexing"
                             }
                         },
-                        "required": ["content", "keywords"]
+                        "required": ["content", "keywords"],
+                        "additionalProperties": False
                     }
                 }
             },
-            "required": ["knowledge_units"]
+            "required": ["knowledge_units"],
+            "additionalProperties": False
         }
 
         response = await self.api_client.create_chat_completion(

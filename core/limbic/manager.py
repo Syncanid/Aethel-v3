@@ -173,9 +173,8 @@ class LimbicManager:
         hint_text = hints.get(drive, "内部驱动触发。")
 
         # 构造 INTERNAL_DRIVE 事件
-        # source.user_id = 'system' 或 'limbic'
         event = OneBotEvent(
-            type=EventType.META,
+            type=EventType.NOTICE,
             detail_type=DetailType.INTERNAL_DRIVE,
             sub_type=drive.value,
             source=EventSource(

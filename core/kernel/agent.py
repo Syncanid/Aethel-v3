@@ -19,6 +19,7 @@ from core.memory.infinite_context import InfiniteContextManager
 from core.memory.vector_store import VectorStore
 from core.social.manager import UserManager
 from core.tool_manager.aggregator import ToolManager
+from core.utilities import calculate_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -87,35 +88,6 @@ class AutonomousAgent:
         """回调：将总线事件放入缓冲区"""
         await self.incoming_events.put(event)
 
-    def _calculate_tokens(self, content: Any) -> float:
-        """
-        [辅助方法] 计算单个内容块的 Token 估算值
-        逻辑源自 v1 planner.py，区分中英文和图片
-        """
-        # 定义中英文的字符-Token比例（根据实测数据校准）
-        CHARS_PER_CHINESE_TOKEN = 1.0  # 中文：286 字 / 177 Token ≈ 1.6 字/Token
-        CHARS_PER_ENGLISH_TOKEN = 5.0  # 英文：1009 字 / 183 Token ≈ 5.5 字/Token
-        SCREENSHOT_TOKEN_COST_APPROX = 30  # 1080p 截图的 Token 估算值
-
-        estimated = 0.0
-
-        if isinstance(content, list):  # 处理多模态内容（列表）
-            for part in content:
-                if part.get("type") == "text":
-                    text = str(part.get("text", ""))
-                    english_chars = sum(1 for char in text if ord(char) < 128)
-                    chinese_chars = len(text) - english_chars
-                    estimated += (english_chars / CHARS_PER_ENGLISH_TOKEN) + (chinese_chars / CHARS_PER_CHINESE_TOKEN)
-                elif part.get("type") == "image_url" or part.get("type") == "image_base64":
-                    estimated += SCREENSHOT_TOKEN_COST_APPROX
-        elif isinstance(content, str):
-            text = content
-            english_chars = sum(1 for char in text if ord(char) < 128)
-            chinese_chars = len(text) - english_chars
-            estimated += (english_chars / CHARS_PER_ENGLISH_TOKEN) + (chinese_chars / CHARS_PER_CHINESE_TOKEN)
-
-        return estimated
-
     def _prune_context(self):
         """
         [v1 移植 - 完整版]
@@ -130,7 +102,7 @@ class AutonomousAgent:
 
         # 1. 计算当前总 Token
         for msg in self.history:
-            current_estimated_tokens += self._calculate_tokens(msg.get("content"))
+            current_estimated_tokens += calculate_tokens(msg.get("content"))
 
         # 2. 永远保留第一条系统提示 (self.history[0])
         # 从最旧的对话（即索引1开始）移除，直到估算总 Token 数回到限制之下
@@ -139,7 +111,7 @@ class AutonomousAgent:
             # 移除第二条消息（最旧的对话，index 0 是 system prompt）
             removed_message = self.history.pop(1)
 
-            removed_cost = self._calculate_tokens(removed_message.get("content"))
+            removed_cost = calculate_tokens(removed_message.get("content"))
             current_estimated_tokens -= removed_cost
 
             logger.info(
@@ -268,10 +240,39 @@ class AutonomousAgent:
 
                 # 调用 LLM
                 response_msg = await self._call_llm()
-                content_str = response_msg.get("content", "")
+                content_str = response_msg.get("content")
+
+                if isinstance(content_str, str):
+                    content_str = (content_str
+                                   .replace("```json", "")
+                                   .replace("```", "")
+                                   .strip())
+                else:
+                    content_str = "{}"
+
+                native_tool_calls = response_msg.get("tool_calls", [])
+                # 注入 Assistant 历史记录
+                # 如果存在原生 tool_calls，必须保留完整结构，否则后续 role: tool 会报错
+                if native_tool_calls:
+                    # 复制消息对象以确保存入的是符合 API 标准的字典
+                    msg_entry = response_msg.copy()
+                    # 确保 content 字段存在（即使为空）
+                    if "content" not in msg_entry or msg_entry["content"] is None:
+                        msg_entry["content"] = ""
+                    self.history.append(msg_entry)
+                else:
+                    # Schema 模式：仅存入文本内容
+                    try:
+                        if content_str.strip().startswith("{"):
+                            formatted_content = json.dumps(json.loads(content_str), ensure_ascii=False)
+                            self.history.append({"role": "assistant", "content": formatted_content})
+                        else:
+                            self.history.append({"role": "assistant", "content": content_str})
+                    except:
+                        self.history.append({"role": "assistant", "content": content_str})
 
                 # [v1 移植] 死锁检测
-                if content_str and content_str == self.last_response_content:
+                if content_str and content_str == self.last_response_content and not native_tool_calls:
                     logger.warning("⚠️ 检测到死锁：模型输出与上一次完全一致。")
                     self.history.append({
                         "role": "user",
@@ -284,32 +285,55 @@ class AutonomousAgent:
 
                 # --- C. 行动阶段 (Action) ---
 
-                # 1. 解析 JSON
-                try:
-                    parsed_data = json.loads(content_str)
-                    thought_content = parsed_data.get("thought", "")
-                    # 获取工具列表，默认为空列表
-                    tool_calls = parsed_data.get("tool_calls", [])
-                    new_scratchpad = parsed_data.get("scratchpad", None)
+                tool_execution_queue = []  # 待执行任务列表: {name, args, id(可选)}
+                thought_content = ""
 
-                    # [v1 移植] 强制状态更新
-                    if new_scratchpad and isinstance(new_scratchpad, dict):
-                        self.scratchpad = new_scratchpad
-                        # 同时更新 ToolManager 中的引用
-                        self.tool_manager.agent_state = self.scratchpad
+                # 1. 尝试解析 Schema 模式的 JSON
+                if content_str:
+                    try:
+                        parsed_data = json.loads(content_str)
+                        thought_content = parsed_data.get("thought", "")
 
-                except json.JSONDecodeError as e:
-                    logger.error(f"JSON 解析失败: {e}")
-                    self.history.append({
-                        "role": "assistant",
-                        "content": content_str
-                    })
-                    # 注入格式错误提示
-                    self.history.append({
-                        "role": "user",
-                        "content": f"SYSTEM ERROR: JSON Format Error: {e}"
-                    })
-                    continue
+                        # 更新 Scratchpad
+                        new_scratchpad = parsed_data.get("scratchpad", None)
+                        if new_scratchpad and isinstance(new_scratchpad, dict):
+                            self.scratchpad = new_scratchpad
+                            self.tool_manager.agent_state = self.scratchpad
+
+                        # 提取 Schema Tool Calls
+                        schema_calls = parsed_data.get("tool_calls", [])
+                        for tc in schema_calls:
+                            tool_execution_queue.append({
+                                "name": tc.get("name"),
+                                "args": tc.get("arguments"),
+                                "id": None  # Schema 模式没有 ID
+                            })
+
+                    except json.JSONDecodeError as e:
+                        # 如果是原生模式且没有 JSON 内容，这是正常的，忽略错误
+                        if not native_tool_calls:
+                            logger.error(f"JSON 解析失败: {e}\n{content_str}")
+                            self.history.append({
+                                "role": "user",
+                                "content": f"SYSTEM ERROR: JSON Format Error: {e}"
+                            })
+                            continue
+
+                # 2. 提取 Native Tool Calls
+                if native_tool_calls:
+                    for tc in native_tool_calls:
+                        # 兼容 object (OpenAI Object) 和 dict
+                        func = tc.function if hasattr(tc, 'function') else tc.get("function", {})
+                        t_id = tc.id if hasattr(tc, 'id') else tc.get("id")
+
+                        name = func.name if hasattr(func, 'name') else func.get("name")
+                        args = func.arguments if hasattr(func, 'arguments') else func.get("arguments")
+
+                        tool_execution_queue.append({
+                            "name": name,
+                            "args": args, # 原生 args 通常是 JSON 字符串
+                            "id": t_id
+                        })
 
                 # 记录思考
                 if thought_content:
@@ -318,19 +342,27 @@ class AutonomousAgent:
                         params={"content": f"💭 {thought_content}"}
                     ))
 
-                # 存入历史
-                self.history.append({"role": "assistant", "content": json.dumps(json.loads(content_str),
-                                                                                separators=(',', ':'), ensure_ascii=False)})
+                # 3. 执行工具列表
+                if tool_execution_queue:
+                    for task in tool_execution_queue:
+                        name = task["name"]
+                        args = task["args"]
+                        t_id = task["id"]
 
-                # 3. 处理并行工具调用
-                if tool_calls:
-                    for tool_call in tool_calls:
-                        name = tool_call.get("name")
-                        args = tool_call.get("arguments", {})
+                        # 参数清洗与解析
+                        if isinstance(args, str):
+                            try:
+                                args = json.loads(args
+                                                  .replace("```json", "")
+                                                  .replace("```", "")
+                                                  .strip())
+                            except json.JSONDecodeError:
+                                logger.warning(f"工具 {name} 参数解析失败: {args}")
+                                args = {}
 
-                        # 如果 Agent 决定使用聊天工具，这会消耗能量并恢复社交值
-                        # 可以在 execute_tool 内部 hook，或者在这里手动调用 limbic
+                        # 聊天消耗能量逻辑
                         if name in ["send_message"]:
+                            current_neuro_state = await self.limbic.get_state()
                             self.limbic.homeostasis.consume_resource(current_neuro_state, "chat")
 
                         try:
@@ -341,32 +373,79 @@ class AutonomousAgent:
 
                             # 执行工具
                             result = await self.tool_manager.execute_tool(name, args)
+                            logger.debug(f"工具 {name} 执行结果：" + json.dumps(result, ensure_ascii=False))
 
-                            logger.debug("执行结果：" + json.dumps(result, indent=4, ensure_ascii=False))
-
-                            # 将结果存回历史
-                            self.history.append({
-                                "role": "tool",
-                                "name": name,
-                                "content": str(result)
-                            })
+                            # 结果回填历史
+                            # 如果有 ID (原生模式)，必须带上 tool_call_id
+                            if t_id:
+                                self.history.append({
+                                    "role": "tool",
+                                    "tool_call_id": t_id,
+                                    "name": name,
+                                    "content": str(result)
+                                })
+                            else:
+                                # Schema 模式
+                                self.history.append({
+                                    "role": "tool",
+                                    "name": name,
+                                    "content": str(result)
+                                })
 
                         except Exception as e:
                             logger.error(f"工具执行错误: {e}")
                             traceback.print_exc()
-                            self.history.append({
-                                "role": "tool",
-                                "name": name,
-                                "content": f"Error: {str(e)}"
-                            })
+                            error_msg = f"Error: {str(e)}"
+
+                            if t_id:
+                                self.history.append({
+                                    "role": "tool",
+                                    "tool_call_id": t_id,
+                                    "name": name,
+                                    "content": error_msg
+                                })
+                            else:
+                                self.history.append({
+                                    "role": "tool",
+                                    "name": name,
+                                    "content": error_msg
+                                })
 
                 # 避免过热空转
-                if not tool_calls:
+                if not tool_execution_queue:
                     await asyncio.sleep(1)
 
             except Exception as e:
                 logger.error(f"主循环异常: {e}", exc_info=True)
                 await asyncio.sleep(5)  # 出错冷却
+
+    def _transcribe_event(self, event: OneBotEvent) -> str:
+        """
+        [事件转译层] 将系统事件转化为 LLM 可理解的自然语言描述
+        """
+        # 1. 处理内部驱动 (生理需求)
+        if event.detail_type == DetailType.INTERNAL_DRIVE:
+            # 解析 raw_data 中的驱动力信息
+            drive_name = event.raw_data.get("drive", "unknown")
+            desc = event.raw_data.get("description", "")
+            return f"【生理信号】{desc} (驱动力: {drive_name})，请决定是否采取行动。"
+
+        # 2. 处理通知 (Notice)
+        if event.type == EventType.NOTICE:
+            if event.detail_type == "group_member_increase":
+                return f"【系统通知】用户 {event.source.user_id} 加入了群聊 {event.source.group_id}。"
+            elif event.detail_type == "group_member_decrease":
+                return f"【系统通知】用户 {event.source.user_id} 离开了群聊 {event.source.group_id}。"
+            return f"【系统通知】检测到事件: {event.detail_type}"
+
+        # 3. 处理请求 (Request)
+        if event.type == EventType.REQUEST:
+            if event.detail_type == "friend":
+                return f"【好友申请】收到来自用户 {event.source.user_id} 的好友申请。"
+
+        # 4. 兜底策略：如果是复杂的未知事件，才使用简化版 JSON
+        simple_data = {k: v for k, v in event.model_dump().items() if k in ['type', 'detail_type', 'source']}
+        return f"【未知信号】系统接收到底层事件: {json.dumps(simple_data, ensure_ascii=False)}"
 
     async def _process_incoming_event(self, event: OneBotEvent):
         """
@@ -374,6 +453,9 @@ class AutonomousAgent:
         1. 让边缘系统“感受”刺激 (Process Stimulus)
         2. 将事件写入历史记录
         """
+        if event.type == EventType.META:
+            return
+
         # 1. 边缘系统介入 (只处理文本消息)
         # 只有真实人类的消息才算作"刺激"，内部信号不算
         if event.type == EventType.MESSAGE and isinstance(event.message, str):
@@ -392,15 +474,15 @@ class AutonomousAgent:
             platform = event.source.platform
             raw_id = event.source.user_id
 
-            # 1. 计算 UID
-            uid = self.user_manager.resolve_uid(platform, raw_id)
+            # 1. 计算 PUID
+            puid = self.user_manager.resolve_puid(platform, raw_id)
 
             # 2. 查询用户 (只读)
-            user_profile = await self.user_manager.get_user(uid)
+            user_profile = await self.user_manager.get_user(puid)
 
             # 3. 注入上下文 (Scratchpad)
             interactor_info = {
-                "uid": uid,
+                "puid": puid,
                 "platform": platform,
                 "user_id": raw_id,
             }
@@ -440,10 +522,8 @@ class AutonomousAgent:
             # 强制唤醒
             self.is_sleeping = False
 
-        context_msg = f"{prefix}{json.dumps(event_data, ensure_ascii=False)}"
-
         # 3. 更新 Scratchpad 上下文 (如果是消息事件)
-        if event.source.platform != "internal":
+        if event.source.platform in adapter_names:
             source = event.source
             ctx_type = "group" if source.group_id else "private"
             ctx_id = source.group_id if source.group_id else source.user_id
@@ -454,14 +534,35 @@ class AutonomousAgent:
                 "id": ctx_id
             }
 
-        self.history.append({"role": "user", "content": context_msg})
+        # 1. 决定消息内容
+        if event.type == EventType.MESSAGE:
+            # 正常对话消息，直接使用
+            content_msg = event.message if isinstance(event.message, str) else str(event.message)
+            is_ephemeral = False  # 对话消息需要被记忆
+        else:
+            # 非对话事件，进行自然语言转译
+            content_msg = self._transcribe_event(event)
+            is_ephemeral = True  # 标记为瞬时消息，不需要存入长时记忆
+
+        # 2. 构建历史记录对象 (增加了 metadata 字段)
+        history_item = {
+            "role": "user",
+            "content": str(content_msg),
+            "metadata": {
+                "type": event.type,
+                "ephemeral": is_ephemeral,
+                "raw_event_id": event.id
+            }
+        }
+
+        self.history.append(history_item)
         logger.info(f"Event Ingested: {event.type}.{event.detail_type}")
 
     async def _active_retrieval(self) -> List[str]:
         """主动记忆检索逻辑"""
-        # 1. 获取当前交互对象的 UID
+        # 1. 获取当前交互对象的 PUID
         interactor = self.scratchpad.get("current_interactor", {})
-        uid = interactor.get("uid", "global")
+        puid = interactor.get("puid", "global")
 
         # 2. 构建查询语句 (Query)
         # 策略：结合 "当前正在做的事(Goal)" 和 "刚才听到的话(Observation)"
@@ -483,8 +584,8 @@ class AutonomousAgent:
         try:
             # 调用向量存储进行检索
             # limit=3 避免上下文过长，只取最相关的
-            logger.debug(f"🔍 执行主动记忆检索: {query[:50]}... (UID: {uid})")
-            memories = await self.vector_store.search_memory(query, uid, limit=3)
+            logger.debug(f"🔍 执行主动记忆检索: {query[:50]}... (PUID: {puid})")
+            memories = await self.vector_store.search_memory(query, puid, limit=3)
             if memories:
                 logger.info(f"📚 检索到 {len(memories)} 条相关记忆")
                 monitor_registry.register_text_source(
@@ -500,55 +601,78 @@ class AutonomousAgent:
         """封装 API 调用"""
         schemas = self.tool_manager.get_tool_schemas()
 
+        use_schema_tools = self.config.get("llm.use_schema_tool_calls", True)
+        arg_mode = self.config.get("llm.tool_call_arg_mode", "object")
+
+        # 基础结构
+        properties = {
+            "thought": {
+                "type": "string",
+                "description": "思考过程和行动规划。"
+            },
+            "scratchpad": {
+                "type": "object",
+                "properties": {
+                    "current_goal": {"type": "string", "description": "当前目标"},
+                    "subtasks": {
+                        "type": "array",
+                        "description": "任务列表。",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "integer"},
+                                "description": {"type": "string"},
+                                "status": {"type": "string", "enum": ["pending", "working", "done", "failed"]}
+                            },
+                            "required": ["id", "description", "status"],
+                            "additionalProperties": False
+                        }
+                    },
+                    "progress_summary": {"type": "string", "description": "已完成的工作"}
+                },
+                "required": ["current_goal", "subtasks", "progress_summary"],
+                "additionalProperties": False
+            }
+        }
+
+        required_fields = ["thought", "scratchpad"]
+
+        # 根据配置决定是否将 tool_calls 注入 Schema
+        if use_schema_tools:
+            # 根据配置决定 arguments 是 object 还是 string
+            arg_schema = {"type": "object"} if arg_mode == "object" else {"type": "string",
+                                                                          "description": "工具的参数对象，JSON格式。例如 '{\"url\": \"https://google.com\"}'"}
+
+            properties["tool_calls"] = {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "arguments": arg_schema
+                    },
+                    "required": ["name", "arguments"],
+                    "additionalProperties": False
+                }
+            }
+            required_fields.append("tool_calls")
+
         # 定义强制思维 Schema (JSON Schema)
         thought_structure = {
             "type": "object",
-            "properties": {
-                "thought": {
-                    "type": "string",
-                    "description": "思考过程和行动规划。"
-                },
-                "scratchpad": {
-                    "type": "object",
-                    "properties": {
-                        "current_goal": {"type": "string", "description": "当前目标"},
-                        "subtasks": {
-                            "type": "array",
-                            "description": "任务列表。",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "id": {"type": "integer"},
-                                    "description": {"type": "string"},
-                                    "status": {"type": "string", "enum": ["pending", "working", "done", "failed"]}
-                                },
-                                "required": ["id", "desc", "status"]
-                            }
-                        },
-                        "variables": {"type": "object", "description": "临时数据或ID"},
-                        "progress_summary": {"type": "string", "description": "已完成的工作"}
-                    },
-                    "required": ["current_goal", "subtasks", "progress_summary"]
-                },
-                "tool_calls": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "arguments": {"type": "object"}
-                        },
-                        "required": ["name", "arguments"]
-                    }
-                }
-            },
-            "required": ["thought", "scratchpad", "tool_calls"],
+            "properties": properties,
+            "required": required_fields,
             "additionalProperties": False
         }
 
+        sanitized_history = [
+            {k: v for k, v in d.items() if k != 'metadata'}
+            for d in self.history
+        ]
+
         # 调用 API，同时传入 tools 和 schema
         response = await self.api_client.create_chat_completion(
-            messages=self.history,
+            messages=sanitized_history,
             tools=schemas if schemas else None,
             schema=thought_structure
         )

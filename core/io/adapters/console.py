@@ -64,15 +64,12 @@ class ConsoleAdapter(BaseAdapter):
         if action.action == "send_message":
             params = action.params
             msg = params.get("message", "")
-            # 模拟机器人回复的格式
-            print(f"\n[Aethel] >> {msg}\n")
-            # 始终返回成功
+            logger.info(f"\n[Aethel] >> {msg}\n")
             return ActionResponse(status=ActionStatus.OK, message="Printed to console")
 
         elif action.action == "broadcast_log":
-            # 用于显示 Agent 的思考过程
             content = action.params.get("content", "")
-            print(f"[状态] {content}")
+            logger.info(f"[状态] {content}")
             return ActionResponse(status=ActionStatus.OK)
 
         return None

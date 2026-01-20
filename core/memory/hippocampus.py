@@ -68,7 +68,16 @@ class Hippocampus:
             # 过滤掉系统提示和工具原始输出（通常只关注对话流）
             # 根据需求，这里保留 user 和 assistant，以及重要的 tool 结果
             if msg_id not in self.processed_ids:
-                # 只关注有内容的交互，忽略纯工具调用结果以免干扰语义
+                # 1. 检查 metadata 中的 ephemeral 标记
+                metadata = msg.get("metadata", {})
+                is_ephemeral = metadata.get("ephemeral", False)
+
+                # 2. 如果是瞬时消息 (如入群通知、生理驱动)，直接跳过，不放入缓冲区
+                if is_ephemeral:
+                    self.processed_ids.add(msg_id)  # 标记为已处理，防止反复检查
+                    continue
+
+                # 3. 正常的角色检查
                 if msg.get("role") in ["user", "assistant"]:
                     new_msgs.append(msg)
                     self.processed_ids.add(msg_id)
@@ -105,10 +114,10 @@ class Hippocampus:
 输入是一段 JSON 格式的对话日志。
 - `user` 角色消息通常包含 `[Event Received]` 和一段 JSON 数据。
 - 你必须从该 JSON 数据中提取用户信息：`platform` 和 `user_id`。
-- 组合唯一标识符 UID: `{platform}:{user_id}` (例如 `onebot:123456`)。
+- 组合唯一标识符 PUID: `{platform}:{user_id}` (例如 `onebot:123456`)。
 
 ## 任务要求
-1. 身份识别：对于每一条提取出的记忆，必须明确它属于哪个 UID。
+1. 身份识别：对于每一条提取出的记忆，必须明确它属于哪个 PUID。
 2. 绝对事实化：
    - 生成的 `content` 必须是自包含的，即使脱离当前对话上下文也能被理解。
    - 错误示例："他喜欢吃苹果" (他是谁？)
@@ -119,8 +128,8 @@ class Hippocampus:
    - Semantic (语义): 通用的世界知识或事实（不依附于特定用户的知识）。
 
 ## 输出 Schema
-请输出 JSON 对象，包含 `memories` 列表。每个 memory 必须包含 `uid` 字段。
-对于 Semantic 记忆，如果它不属于特定用户（是通用知识），`uid` 可填 "global"。
+请输出 JSON 对象，包含 `memories` 列表。每个 memory 必须包含 `puid` 字段。
+对于 Semantic 记忆，如果它不属于特定用户（是通用知识），`puid` 可填 "global"。
 """
         # 简化输入内容，只发送 role 和 content
         input_data = [{"role": m["role"], "content": m["content"]} for m in buffer]
@@ -136,7 +145,7 @@ class Hippocampus:
                         "items": {
                             "type": "object",
                             "properties": {
-                                "uid": {
+                                "puid": {
                                     "type": "string",
                                     "description": "The unique user ID (platform:user_id) this memory belongs to, or 'global'."
                                 },
@@ -144,11 +153,13 @@ class Hippocampus:
                                 "key": {"type": "string", "description": "Only for core memory (e.g. 'basic:name')"},
                                 "content": {"type": "string", "description": "Absolute fact statement."}
                             },
-                            "required": ["uid", "type", "content"]
+                            "required": ["puid", "type", "key", "content"],
+                            "additionalProperties": False
                         }
                     }
                 },
-                "required": ["memories"]
+                "required": ["memories"],
+                "additionalProperties": False
             }
 
             resp = await self.api_client.create_chat_completion(
@@ -163,21 +174,21 @@ class Hippocampus:
             memories = data.get("memories", [])
 
             for mem in memories:
-                uid = mem.get("uid", "unknown")
+                puid = mem.get("puid", "unknown")
                 content = mem["content"]
 
                 # 执行存储
                 if mem["type"] == "core":
                     # Core memory 依然需要 key 来覆盖旧值
                     key = mem.get("key", "misc")
-                    await self.vector_store.save_core_memory(uid, key, content)
+                    await self.vector_store.save_core_memory(puid, key, content)
                 elif mem["type"] == "episodic":
-                    await self.vector_store.save_vector_memory(EpisodicMemory(content=content), uid)
+                    await self.vector_store.save_vector_memory(EpisodicMemory(content=content), puid)
                 elif mem["type"] == "semantic":
-                    await self.vector_store.save_vector_memory(SemanticMemory(content=content), uid)
+                    await self.vector_store.save_vector_memory(SemanticMemory(content=content), puid)
 
             if memories:
-                logger.info(f"归档完成: 为 {len(set(m['uid'] for m in memories))} 位用户生成了 {len(memories)} 条记忆")
+                logger.info(f"归档完成: 为 {len(set(m['puid'] for m in memories))} 位用户生成了 {len(memories)} 条记忆")
 
         except Exception as e:
             logger.error(f"记忆转换失败: {e}")

@@ -1,10 +1,10 @@
 # core/memory/infinite_context.py
-import json
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict
 
 from core.infrastructure.api_client import GenericAPIClient
 from core.infrastructure.config_loader import Config
+from core.utilities import calculate_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -44,26 +44,15 @@ class InfiniteContextManager:
         content = message.get("content", "")
         return isinstance(content, str) and "<infinite_context>" in content
 
-    def _calculate_tokens(self, messages: List[Dict]) -> int:
-        """简单的 Token 估算 (与 Agent 中类似)"""
-        total = 0
-        for msg in messages:
-            content = msg.get("content", "")
-            if isinstance(content, str):
-                total += len(content)  # 粗略估算：1 char ≈ 0.5-1 token (中文)
-            elif isinstance(content, list):
-                # 处理多模态
-                for part in content:
-                    if part.get("type") == "text":
-                        total += len(str(part.get("text", "")))
-        return int(total * 0.7)  # 粗略换算
-
     async def compress_if_needed(self, history: List[Dict]) -> bool:
         """
         检查并执行压缩。如果历史记录被修改了，返回 True。
         :param history: Agent 的历史记录引用 (会直接修改)
         """
-        current_tokens = self._calculate_tokens(history)
+
+        current_tokens = 0.0
+        for msg in history:
+            current_tokens += calculate_tokens(msg.get("content"))
 
         # 如果未达到阈值，跳过
         if current_tokens < self.trigger_threshold:
@@ -89,7 +78,6 @@ class InfiniteContextManager:
 
         # 检查是否已经有旧的摘要
         existing_summary = ""
-        msgs_to_process = []
 
         # 如果 to_compress_msgs 的第一条已经是 infinite_context，提取出来作为基础
         if self._is_compressed_message(to_compress_msgs[0]):

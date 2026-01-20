@@ -21,7 +21,7 @@ class UserManager:
             await conn.execute("""
                                CREATE TABLE IF NOT EXISTS social_users
                                (
-                                   uid
+                                   puid
                                    TEXT
                                    PRIMARY
                                    KEY,
@@ -40,25 +40,21 @@ class UserManager:
             await conn.commit()
         logger.info("社交系统 (Social System) 已初始化")
 
-    def resolve_uid(self, platform: str, raw_id: str) -> str:
-        """生成全局唯一 UID"""
-        return f"{platform}:{raw_id}"
-
-    async def get_user(self, uid: str) -> Optional[UserProfile]:
+    async def get_user(self, puid: str) -> Optional[UserProfile]:
         """获取用户 (Read Only)"""
-        if uid in self._cache:
-            return self._cache[uid]
+        if puid in self._cache:
+            return self._cache[puid]
 
         async with self.db.get_connection() as conn:
-            cursor = await conn.execute("SELECT data_json FROM social_users WHERE uid=?", (uid,))
+            cursor = await conn.execute("SELECT data_json FROM social_users WHERE puid=?", (puid,))
             row = await cursor.fetchone()
             if row:
                 try:
                     profile = UserProfile.from_dict(json.loads(row[0]))
-                    self._cache[uid] = profile
+                    self._cache[puid] = profile
                     return profile
                 except Exception as e:
-                    logger.error(f"用户数据解析失败 {uid}: {e}")
+                    logger.error(f"用户数据解析失败 {puid}: {e}")
         return None
 
     async def list_users(self, limit: int = 20, offset: int = 0) -> List[UserProfile]:
@@ -82,17 +78,17 @@ class UserManager:
     async def save_user(self, profile: UserProfile):
         """保存/更新用户 (Write)"""
         profile.last_seen = time.time()
-        self._cache[profile.uid] = profile
+        self._cache[profile.puid] = profile
 
         async with self.db.get_connection() as conn:
             await conn.execute(
                 """
                 INSERT OR REPLACE INTO social_users 
-                (uid, platform, user_id, nickname, data_json, last_seen)
+                (puid, platform, user_id, nickname, data_json, last_seen)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    profile.uid,
+                    profile.puid,
                     profile.platform,
                     profile.user_id,
                     profile.nickname,

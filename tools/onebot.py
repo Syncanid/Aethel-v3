@@ -50,7 +50,7 @@ async def get_friends(ob_adapter: OneBotV11Adapter, config: Config = None) -> Li
 
         friends.append({
             "name": friend.get("remark") or friend.get("nickname"),
-            "id": friend["user_id"],
+            "user_id": friend["user_id"],
             "sex": friend.get("sex", "unknown")
         })
     return friends
@@ -209,7 +209,7 @@ async def get_groups(ob_adapter: OneBotV11Adapter) -> List[Dict[str, Any]]:
     for group in data:
         groups.append({
             "name": group.get("group_remark") or group.get("group_name"),
-            "id": group["group_id"],
+            "group_id": group["group_id"],
             "member_count": group["member_count"],
         })
     return groups
@@ -228,7 +228,7 @@ async def get_group_info(ob_adapter: OneBotV11Adapter, group_id: str) -> Dict[st
     return {
         "name": data.get("group_name"),
         "remark": data.get("group_remark"),
-        "id": data.get("group_id"),
+        "group_id": data.get("group_id"),
         "member_count": data.get("member_count"),
         "max_member_count": data.get("max_member_count"),
     }
@@ -244,7 +244,7 @@ async def get_group_members(ob_adapter: OneBotV11Adapter, group_id: str) -> List
     for member in data:
         members.append({
             "name": member["card"] or member["nickname"],
-            "id": member["user_id"],
+            "user_id": member["user_id"],
             "sex": member["sex"],
             "title": member["title"],
             # "age": member["age"] if member["age"] > 0 else "未知",

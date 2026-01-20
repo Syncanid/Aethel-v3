@@ -63,7 +63,8 @@ class AppraisalSystem:
                         "oxytocin": {"type": "number"},
                         "reason": {"type": "string"}
                     },
-                    "required": ["dopamine", "cortisol", "reason"]
+                    "required": ["dopamine", "cortisol", "reason"],
+                    "additionalProperties": False
                 }
             )
 

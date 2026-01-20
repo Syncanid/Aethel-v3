@@ -137,8 +137,8 @@ prime_directives:
         facts = role_data.get("facts", {})
         if facts:
             blocks.append("\n## 事实性设定（不可随意篡改）")
-            for k, v in facts.items():
-                blocks.append(f"- {self._beautify_key(k)}：{v}")
+            for f in facts:
+                blocks.append(f"- {f}")
 
         # ========= Prime Directives（兼容旧系统） =========
         directives = role_data.get("prime_directives", [])

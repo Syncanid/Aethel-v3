@@ -10,8 +10,18 @@ llm:
   # 兼容 OpenAI 格式的 API 设置
   api_base_url: "https://api.openai.com/v1"
   api_key: "sk-YourKeyHere"
+
   model_name: "gpt-4o"
   model_context: 32767
+  # 工具调用策略配置
+  # true: 在返回的 JSON content 中检测 tool_calls 字段
+  # false: 使用 API 原生的 tool_calls 字段返回
+  use_schema_tool_calls: false
+  # Schema 中 arguments 的类型，use_schema_tool_calls 为 false 时无效。
+  # object: 要求模型直接输出 JSON 对象 ({"arg": "val"})
+  # string: 要求模型输出序列化的 JSON 字符串 ("{\"arg\": \"val\"}")
+  tool_call_arg_mode: "object"
+
   embedding_model_name: "text-embedding-ada-002"
 
   prompt_file: "data/prompts/system_prompt.md"

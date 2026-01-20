@@ -7,7 +7,7 @@ from typing import Dict, List, Any
 @dataclass
 class UserProfile:
     # --- 身份标识 ---
-    uid: str  # 全局唯一标识
+    puid: str  # 全局唯一标识
     platform: str  # 来源平台
     user_id: str  # 平台原始 ID
 

@@ -21,8 +21,7 @@ def _clamp(value: float, min_v: float, max_v: float) -> float:
 
 @register()
 async def social_record_user(
-        platform: str,
-        user_id: str,
+        puid: str,
         nickname: str,
         impression: str,
         relationship_tags: List[str],
@@ -35,28 +34,26 @@ async def social_record_user(
     当你遇到一个尚未记录在案的陌生人，且判断通过交互需要长期记住他时，调用此工具。
 
     约束：
-    1. 严禁捏造用户：platform 和 user_id 必须严格来自当前交互事件的上下文（source）。
+    1. 严禁捏造用户：platform 和 user_id 必须严格来自当前交互事件的上下文。
     2. 这是一个“存档”操作，不是“创造”操作。
 
     Args:
-        platform: 用户所属平台 (来自 event.source.platform)
-        user_id: 用户的原始ID (来自 event.source.user_id)
+        puid: 用户PUID (platform:user_id)
         nickname: 你对该用户的称呼 (或用户自称)
         impression: 基于当前对话产生的初步印象
         relationship_tags: 初始关系标签 (如: ['stranger', 'user'])
     """
-    uid = user_manager.resolve_uid(platform, user_id)
 
-    if await user_manager.get_user(uid):
+    if await user_manager.get_user(puid):
         return (
-            f"记忆中已存在该用户：{nickname} (UID: {uid})\n"
+            f"记忆中已存在该用户：{nickname} (PUID: {puid})\n"
             f"如需更新现有认知，请使用 `social_update_info` 或 `social_update_perception`。"
         )
 
     profile = UserProfile(
-        uid=uid,
-        platform=platform,
-        user_id=user_id,
+        puid=puid,
+        platform=puid.split(":")[0],
+        user_id=puid.split(":")[1],
         nickname=nickname,
         impression=impression,
         relationship_tags=list(set(relationship_tags)) if relationship_tags else []
@@ -73,14 +70,14 @@ async def social_record_user(
     return (
         f"已将用户归档至长期记忆\n"
         f"- 昵称：{nickname}\n"
-        f"- 索引：{uid}\n"
+        f"- 索引：{puid}\n"
         f"- 标签：{profile.relationship_tags}"
     )
 
 
 @register()
 async def social_update_perception(
-        uid: str,
+        puid: str,
         dimension: str,
         delta: float,
         reason: str,
@@ -90,14 +87,14 @@ async def social_update_perception(
     更新你对某个用户的情感 / 认知维度。
 
     Args:
-        uid: 用户唯一标识 (platform:user_id)
+        puid: 用户唯一标识 (platform:user_id)
         dimension: 维度可选 [favorability(好感), trust(信任), intimacy(亲密)]
         delta: 变化值（建议范围 -10.0 ~ +10.0）
         reason: 变更原因（将作为记忆凭证写入历史）
     """
-    profile = await user_manager.get_user(uid)
+    profile = await user_manager.get_user(puid)
     if not profile:
-        return f"未找到用户档案 (UID: {uid})，请先使用 `social_record_user` 进行录入。"
+        return f"未找到用户档案 (UID: {puid})，请先使用 `social_record_user` 进行录入。"
 
     # 维度配置表
     DIMENSIONS: Dict[str, Dict] = {
@@ -139,7 +136,7 @@ async def social_update_perception(
 @register()
 async def social_update_info(
         user_manager: UserManager,
-        uid: str,
+        puid: str,
         nickname: Optional[str] = None,
         impression: Optional[str] = None,
         add_tags: Optional[List[str]] = None,
@@ -148,9 +145,9 @@ async def social_update_info(
     """
     更新用户的基础档案信息（昵称 / 印象 / 标签）。
     """
-    profile = await user_manager.get_user(uid)
+    profile = await user_manager.get_user(puid)
     if not profile:
-        return f"未找到用户 (UID: {uid})"
+        return f"未找到用户 (PUID: {puid})"
 
     logs: List[str] = []
 
@@ -185,9 +182,9 @@ async def social_update_info(
 
 
 @register()
-async def social_lookup(uid: str, user_manager: UserManager) -> str:
+async def social_lookup(puid: str, user_manager: UserManager) -> str:
     """查询用户完整档案"""
-    profile = await user_manager.get_user(uid)
+    profile = await user_manager.get_user(puid)
     if not profile:
         return "用户不存在。"
     return str(profile.to_dict())
@@ -216,7 +213,7 @@ async def social_list_users(
         stats = f"好感 {u.favorability:.0f} | 信任 {u.trust:.0f}"
 
         lines.append(
-            f"- {u.nickname or '(无昵称)'} `{u.uid}` {tags}\n"
+            f"- {u.nickname or '(无昵称)'} `{u.puid}` {tags}\n"
             f"  {stats} ｜ 上次互动：{last_seen}"
         )
 

@@ -25,7 +25,7 @@ def _get_store():
 
 @register()
 async def remember_core_info(
-        user_uid: str,
+        puid: str,
         key: str,
         value: str,
         event_bus: EventBus,
@@ -35,12 +35,12 @@ async def remember_core_info(
     用于记录用户的长期属性、偏好、关系等结构化信息。
 
     Args:
-        user_uid: 用户唯一标识 (platform:user_id)
+        puid: 用户唯一标识 (platform:user_id)
         key: 信息的键名，建议格式 '类别:名称' (如 'basic:name')。
         value: 具体内容。
     """
     store = _get_store()
-    await store.save_core_memory(user_uid, key, value)
+    await store.save_core_memory(puid, key, value)
 
     event_bus.publish_action(Action(
         action="broadcast_log",
@@ -87,9 +87,9 @@ async def update_knowledge_status(
 
 @register()
 async def recall_memory(
-        query: str,
         event_bus: EventBus,
-        user_id: str
+        query: str,
+        puid: str
 ) -> str:
     """
     [读取] 主动搜索记忆库。
@@ -97,9 +97,10 @@ async def recall_memory(
 
     Args:
         query: 搜索关键词或问题。
+        puid: 用户唯一标识
     """
     store = _get_store()
-    results = await store.search_memory(query, user_id)
+    results = await store.search_memory(query, puid)
 
     if not results:
         return "未找到相关记忆。"

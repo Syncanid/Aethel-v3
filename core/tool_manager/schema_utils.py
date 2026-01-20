@@ -15,6 +15,7 @@ class SchemaGenerator:
             "type": "object",
             "properties": {},
             "required": [],
+            "additionalProperties": False,
         }
 
         signature = inspect.signature(func)
