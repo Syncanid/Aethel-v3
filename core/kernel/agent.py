@@ -42,6 +42,7 @@ class AutonomousAgent:
         }
         self.last_response_content = ""  # 用于死锁检测
         self.last_observation_text = None
+        self.consecutive_idle_count = 0  # 空转计数器
 
         # --- 初始化工具管理器 (注入依赖) ---
         self.tool_manager = ToolManager(
@@ -182,6 +183,8 @@ class AutonomousAgent:
 
                 if event:
                     await self._process_incoming_event(event)
+                    # 如果收到新事件，重置空转计数器
+                    self.consecutive_idle_count = 0
                     if self.wakeup_job_id:
                         try:
                             self.scheduler.remove_job(self.wakeup_job_id)
@@ -273,10 +276,10 @@ class AutonomousAgent:
 
                 # [v1 移植] 死锁检测
                 if content_str and content_str == self.last_response_content and not native_tool_calls:
-                    logger.warning("⚠️ 检测到死锁：模型输出与上一次完全一致。")
+                    logger.warning("⚠️ 检测到内容重复死锁。")
                     self.history.append({
                         "role": "user",
-                        "content": "SYSTEM WARNING: 你陷入了死循环。请改变策略。"
+                        "content": "SYSTEM WARNING: 你输出的内容与上一次完全一致，且未执行任何操作。请改变策略，或使用 wait 工具挂起。"
                     })
                     self.last_response_content = ""  # 重置以允许下一次尝试
                     continue  # 跳过本次处理，直接进入下一轮接收系统警告
@@ -344,6 +347,9 @@ class AutonomousAgent:
 
                 # 3. 执行工具列表
                 if tool_execution_queue:
+                    # 有工具执行，重置空转计数器
+                    self.consecutive_idle_count = 0
+
                     for task in tool_execution_queue:
                         name = task["name"]
                         args = task["args"]
@@ -411,8 +417,24 @@ class AutonomousAgent:
                                     "content": error_msg
                                 })
 
-                # 避免过热空转
-                if not tool_execution_queue:
+                # 空转检测与熔断
+                else:
+                    # 没有执行任何工具
+                    self.consecutive_idle_count += 1
+                    logger.warning(f"⚠️ 空转检测: {self.consecutive_idle_count}/3")
+
+                    if self.consecutive_idle_count >= 3:
+                        logger.warning("🚫 触发空转熔断：强制注入警告。")
+                        self.history.append({
+                            "role": "user",
+                            "content": "SYSTEM WARNING: 检测到你连续多次进行思考但未执行任何操作（未调用工具）。\n"
+                                       "1. 如果你在等待用户回复，必须调用 `wait` 工具挂起。\n"
+                                       "2. 如果你任务已完成，请调用 `wait` 进入待命。\n"
+                                       "3. 禁止无意义的循环思考。"
+                        })
+                        # 重置计数器以免一直刷屏，或者让模型有机会反应
+                        self.consecutive_idle_count = 0
+
                     await asyncio.sleep(1)
 
             except Exception as e:
@@ -475,7 +497,7 @@ class AutonomousAgent:
             raw_id = event.source.user_id
 
             # 1. 计算 PUID
-            puid = self.user_manager.resolve_puid(platform, raw_id)
+            puid = f"{platform}:{raw_id}"
 
             # 2. 查询用户 (只读)
             user_profile = await self.user_manager.get_user(puid)
@@ -506,6 +528,10 @@ class AutonomousAgent:
 
             # 更新 Scratchpad
             self.scratchpad["current_interactor"] = interactor_info
+            monitor_registry.register_text_source(
+                "认知", "人员注入",
+                lambda: json.dumps(interactor_info, indent=2, ensure_ascii=False)
+            )
 
         # 2. 序列化事件
         event_data = event.model_dump(exclude_none=True)
@@ -537,7 +563,7 @@ class AutonomousAgent:
         # 1. 决定消息内容
         if event.type == EventType.MESSAGE:
             # 正常对话消息，直接使用
-            content_msg = event.message if isinstance(event.message, str) else str(event.message)
+            content_msg = f"{prefix}{json.dumps(event_data, ensure_ascii=False)}"
             is_ephemeral = False  # 对话消息需要被记忆
         else:
             # 非对话事件，进行自然语言转译
