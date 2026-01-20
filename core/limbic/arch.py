@@ -25,13 +25,13 @@ class NeuroState:
     神经化学状态
     """
     # 神经递质 (0.0 ~ 1.0)
-    dopamine: float = 0.5
-    serotonin: float = 0.5
+    dopamine: float = 0.4
+    serotonin: float = 0.6
     cortisol: float = 0.1
     oxytocin: float = 0.5
 
     # 生理稳态
-    social_satiety: float = 0.2  # 社交饱腹感 (1.0=独处快乐, 0.0=极度孤独)
+    social_satiety: float = 0.35  # 社交饱腹感 (1.0=独处快乐, 0.0=极度孤独)
     cognitive_energy: float = 1.0  # 认知能量 (1.0=精力充沛, 0.0=宕机)
 
     # 元数据
