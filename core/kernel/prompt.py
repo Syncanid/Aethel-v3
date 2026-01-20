@@ -7,13 +7,13 @@ import time
 from typing import Any, Optional, List
 
 import yaml
-from typing_extensions import LiteralString
 
 from core.gui.monitor_registry import monitor_registry
 from core.infrastructure.config_loader import Config
 from core.limbic.arch import NeuroState
 
 logger = logging.getLogger(__name__)
+
 
 class PromptManager:
     def __init__(self, config: Config):
@@ -26,7 +26,7 @@ class PromptManager:
 
         self.role, role_data = self._load_role_yaml()
 
-        logger.info("已加载角色卡："+role_data.get("identity").get("name"))
+        logger.info("已加载角色卡：" + role_data.get("identity").get("name"))
 
     def _ensure_prompt_file(self):
         if not os.path.exists(self.prompt_path):
@@ -203,11 +203,16 @@ prime_directives:
 
         # 情绪基调判断
         mood_tone = "平静"
-        if state.dopamine > 0.7: mood_tone = "兴奋/充满动力"
-        elif state.cortisol > 0.6: mood_tone = "焦虑/压力大"
-        elif state.oxytocin > 0.7: mood_tone = "温情/充满信任"  # [新增] 高依恋状态
-        elif state.serotonin > 0.7: mood_tone = "满足/安详"
-        elif state.social_satiety < 0.3: mood_tone = "孤独/渴望交流"
+        if state.dopamine > 0.7:
+            mood_tone = "兴奋/充满动力"
+        elif state.cortisol > 0.6:
+            mood_tone = "焦虑/压力大"
+        elif state.oxytocin > 0.7:
+            mood_tone = "温情/充满信任"  # [新增] 高依恋状态
+        elif state.serotonin > 0.7:
+            mood_tone = "满足/安详"
+        elif state.social_satiety < 0.3:
+            mood_tone = "孤独/渴望交流"
 
         return f"""
 ## 生理与情绪状态

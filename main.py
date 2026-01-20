@@ -1,11 +1,12 @@
 # main.py
 import asyncio
 import logging
-import signal
 import sys
 import threading
 from typing import List, Optional
 
+from core.gui.dashboard import run_gui
+from core.gui.monitor_registry import monitor_registry
 # --- 基础设施层 ---
 from core.infrastructure.config_loader import Config
 from core.infrastructure.database import Database
@@ -16,9 +17,6 @@ from core.io.adapters.onebot_v11 import OneBotV11Adapter
 from core.io.event_bus import EventBus
 # --- 认知内核层 ---
 from core.kernel.agent import AutonomousAgent
-
-from core.gui.monitor_registry import monitor_registry
-from core.gui.dashboard import run_gui
 
 # --- 装饰 ---
 BANNER = r"""

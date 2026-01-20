@@ -1,7 +1,6 @@
 # core/gui/dashboard.py
 import json
 import sys
-from datetime import datetime
 
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,

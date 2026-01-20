@@ -34,9 +34,9 @@ proxy:
   https: ""
 
 mcp_servers:
-  # MCP 服务器配置示例 (后续阶段使用)
-  # filesystem:
-  #   command: "npx"
-  #   args: ["-y", "@modelcontextprotocol/server-filesystem", "./data"]
+# MCP 服务器配置示例 (后续阶段使用)
+# filesystem:
+#   command: "npx"
+#   args: ["-y", "@modelcontextprotocol/server-filesystem", "./data"]
 
 searxng_base_url: "http://127.0.0.1:8080"

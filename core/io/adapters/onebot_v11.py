@@ -4,9 +4,9 @@ import json
 import logging
 import uuid
 from datetime import datetime
+from typing import Dict, Any, Optional
 
 import websockets
-from typing import Dict, Any, Optional
 
 from core.io.adapters.base import BaseAdapter
 from core.io.event_bus import EventBus

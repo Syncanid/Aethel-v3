@@ -1,6 +1,7 @@
 # Aethel v3 (Project Code: Trinity)
 
-Aethel v3 是一个基于 Python `asyncio` 构建的**自主 AI 智能体框架**。它不仅仅是一个聊天机器人，而是一个具备长期记忆整理能力、自主思考循环、以及通过 **MCP (Model Context Protocol)** 进行工具扩展的“数字生命”原型。
+Aethel v3 是一个基于 Python `asyncio` 构建的**自主 AI 智能体框架**。它不仅仅是一个聊天机器人，而是一个具备长期记忆整理能力、自主思考循环、以及通过
+**MCP (Model Context Protocol)** 进行工具扩展的“数字生命”原型。
 
 核心设计目标是实现一个**事件驱动**、**高度模块化**且具备**自我进化能力**的智能实体。
 
@@ -12,8 +13,10 @@ Aethel v3 是一个基于 Python `asyncio` 构建的**自主 AI 智能体框架*
     * **时间感知**: 能够感知系统启动时间和相对时间流逝，具备 Cron 级别的任务调度能力。
 
 * **💾 海马体记忆系统**
-    * **仿生记忆架构**: 区分**核心记忆** (Core, 用户画像)、**情景记忆** (Episodic, 经历事件) 和 **语义记忆** (Semantic, 事实知识)。
-    * **自动归档**: 后台进程 (`Hippocampus`) 会自动监控对话流，触发 LLM 提炼关键信息并存入向量数据库 (ChromaDB) 和 SQLite。
+    * **仿生记忆架构**: 区分**核心记忆** (Core, 用户画像)、**情景记忆** (Episodic, 经历事件) 和 **语义记忆** (Semantic,
+      事实知识)。
+    * **自动归档**: 后台进程 (`Hippocampus`) 会自动监控对话流，触发 LLM 提炼关键信息并存入向量数据库 (ChromaDB) 和
+      SQLite。
     * **知识摄入**: 支持读取本地文件，自动分块并转化为知识条目。
 
 * **🛠️ 混合工具生态**
@@ -60,28 +63,30 @@ graph TD
 ### 安装步骤
 
 1. **克隆项目**
+
 ```bash
 git clone https://github.com/furryaxw/Aethel-v3.git
 cd Aethel-v3
 
 ```
 
-
 2. **安装依赖**
+
 ```bash
 pip install -r requirements.txt
 
 ```
 
 3. **配置文件**
-复制默认配置模板：
+   复制默认配置模板：
+
 ```bash
 cp data/config.yaml.default data/config.yaml
 
 ```
 
-
 编辑 `data/config.yaml`，填入你的 LLM API Key：
+
 ```yaml
 llm:
   api_base_url: "https://api.openai.com/v1" # 或其他兼容接口
@@ -90,8 +95,6 @@ llm:
   embedding_model_name: "text-embedding-ada-002"
 
 ```
-
-
 
 ### 运行
 
@@ -124,6 +127,7 @@ python main.py
 * **System**: 设置日志级别 (`log_level`).
 * **LLM**: 配置大模型接口。
 * **MCP Servers**: 配置外部 MCP 服务（如文件系统操作）。
+
 ```yaml
 mcp_servers:
   filesystem:
@@ -131,8 +135,6 @@ mcp_servers:
     args: ["-y", "@modelcontextprotocol/server-filesystem", "./data"]
 
 ```
-
-
 
 ## 📄 License
 

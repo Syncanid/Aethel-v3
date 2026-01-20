@@ -11,7 +11,6 @@ from core.infrastructure.config_loader import Config
 from core.infrastructure.database import Database
 from core.io.event_bus import EventBus
 from core.io.event_schema import OneBotEvent, EventSource, EventType, DetailType
-from core.limbic import homeostasis
 from core.limbic.appraisal import AppraisalSystem
 from core.limbic.arch import NeuroState, DriveType
 from core.limbic.chemistry import NeuroChemistry

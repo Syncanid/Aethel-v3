@@ -6,7 +6,7 @@ import time
 from datetime import datetime
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QBrush, QAction
+from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QTabWidget, QTableWidget, QTableWidgetItem, QPushButton,
                              QLabel, QLineEdit, QMessageBox, QHeaderView, QAbstractItemView,

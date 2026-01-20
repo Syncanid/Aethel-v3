@@ -150,7 +150,7 @@ async def wait(
             _dispatch_wake_up,
             'date',
             run_date=run_date,
-            args=[event_bus, reason]
+            args=[event_bus, "等待超时"]
         )
 
         # 将 Job ID 绑定到 Agent 实例，用于后续取消

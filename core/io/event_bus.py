@@ -71,7 +71,8 @@ class EventBus:
                 if isinstance(res, Exception):
                     logger.error(f"Action handler failed: {res}")
                     if not final_response:
-                        final_response = ActionResponse(status=ActionStatus.FAILED, message=f"Handler error: {str(res)}")
+                        final_response = ActionResponse(status=ActionStatus.FAILED,
+                                                        message=f"Handler error: {str(res)}")
 
                 elif isinstance(res, ActionResponse):
                     # 如果处理器返回了有效响应

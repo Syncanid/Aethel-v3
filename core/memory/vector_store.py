@@ -104,7 +104,7 @@ class VectorStore:
             if existing['ids'] and existing['ids'][0]:
                 existing_id = existing['ids'][0][0]
                 existing_doc = existing['documents'][0][0]
-                existing_dist = existing['distances'][0][0] # Chroma 默认 L2 距离
+                existing_dist = existing['distances'][0][0]  # Chroma 默认 L2 距离
 
                 # 判定标准：向量距离很近 (根据模型调整，一般 < 0.2 表示非常相似)
                 # 且 文本重合度高 (避免“我喜欢猫”和“我不喜欢猫”向量很近但意思相反的情况)
@@ -120,7 +120,7 @@ class VectorStore:
             if is_duplicate:
                 # 策略 A: 语义记忆 -> 合并关键词，更新时间
                 if isinstance(memory, SemanticMemory):
-                     # 获取旧的 metadata
+                    # 获取旧的 metadata
                     old_meta = existing['metadatas'][0][0]
 
                     # 合并关键词 (去重)
@@ -130,11 +130,11 @@ class VectorStore:
 
                     # 更新 metadata
                     old_meta["keywords"] = ",".join(merged_keywords)
-                    old_meta["last_accessed"] = time.time() # 刷新活跃时间
+                    old_meta["last_accessed"] = time.time()  # 刷新活跃时间
 
                     # 如果新内容更长/更详细，替换旧内容；否则保留旧内容
                     final_content = existing_doc
-                    if len(memory.content) > len(existing_doc) + 10: # 显著更长
+                    if len(memory.content) > len(existing_doc) + 10:  # 显著更长
                         final_content = memory.content
                         # 需要重新更新向量吗？如果内容变了最好更新，但为了节省资源，
                         # 如果是 update 操作，Chroma 需要传入 embedding。

@@ -1,6 +1,7 @@
 # core/gui/monitor_registry.py
 from typing import Callable, Dict, Any, List
 
+
 class MonitorRegistry:
     """
     监控数据注册中心
@@ -53,6 +54,7 @@ class MonitorRegistry:
             except:
                 result[label] = {"value": 0, "min": 0, "max": 1}
         return result
+
 
 # 全局单例
 monitor_registry = MonitorRegistry()
