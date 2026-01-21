@@ -541,10 +541,7 @@ class AutonomousAgent:
         if "message" in event_data and "alt_message" in event_data:
             del event_data["message"]
 
-        # [特殊处理] 如果是内部驱动信号，添加高亮提示
-        prefix = ""
         if event.detail_type == DetailType.INTERNAL_DRIVE:
-            prefix = "[紧急]\n"
             # 强制唤醒
             self.is_sleeping = False
 
@@ -563,7 +560,7 @@ class AutonomousAgent:
         # 1. 决定消息内容
         if event.type == EventType.MESSAGE:
             # 正常对话消息，直接使用
-            content_msg = f"{prefix}{json.dumps(event_data, ensure_ascii=False)}"
+            content_msg = f"接收到用户消息：{json.dumps(event_data, ensure_ascii=False)}"
             is_ephemeral = False  # 对话消息需要被记忆
         else:
             # 非对话事件，进行自然语言转译

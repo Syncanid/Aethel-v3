@@ -51,36 +51,7 @@ SCHEMA_SQL = {
                                   group_id
                               )
                                   );
-                              """,
-    "chat_logs": """
-                 CREATE TABLE IF NOT EXISTS chat_logs
-                 (
-                     id
-                     INTEGER
-                     PRIMARY
-                     KEY
-                     AUTOINCREMENT,
-                     msg_id
-                     TEXT
-                     UNIQUE,
-                     message_seq
-                     INTEGER,
-                     user_id
-                     TEXT,
-                     group_id
-                     TEXT,
-                     role
-                     TEXT,
-                     content
-                     TEXT,
-                     msg_type
-                     TEXT,
-                     timestamp
-                     REAL,
-                     raw_data
-                     TEXT
-                 );
-                 """
+                              """
 }
 
 
