@@ -132,7 +132,7 @@ python main.py
 mcp_servers:
   filesystem:
     command: "npx"
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "./data"]
+    args: [ "-y", "@modelcontextprotocol/server-filesystem", "./data" ]
 
 ```
 

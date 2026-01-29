@@ -13,8 +13,8 @@ from core.infrastructure.config_loader import Config
 from core.infrastructure.database import Database
 from core.io.event_bus import EventBus
 from core.io.event_schema import OneBotEvent, Action, DetailType, EventType
-from core.kernel.prompt import PromptManager
 from core.kernel.attention import AttentionFilter, ReactionType
+from core.kernel.prompt import PromptManager
 from core.limbic.manager import LimbicManager
 from core.memory.hippocampus import Hippocampus
 from core.memory.infinite_context import InfiniteContextManager

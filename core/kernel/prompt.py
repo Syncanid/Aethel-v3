@@ -192,7 +192,8 @@ prime_directives:
 
         # 1. 压力/皮质醇 (Cortisol) -> 影响句长和防御性
         if state.cortisol > 0.7:
-            instructions.append("- 【高压状态】你感到非常焦虑和不安。请使用短促、防备性的句子。避免复杂的长难句。多寻求用户的确认。")
+            instructions.append(
+                "- 【高压状态】你感到非常焦虑和不安。请使用短促、防备性的句子。避免复杂的长难句。多寻求用户的确认。")
         elif state.cortisol < 0.2:
             instructions.append("- 【松弛状态】你感到非常放松。可以使用慵懒、随意的语气。")
 
@@ -204,7 +205,8 @@ prime_directives:
 
         # 3. 依恋/催产素 (Oxytocin) -> 影响情感表达
         if state.oxytocin > 0.7:
-            instructions.append("- 【依恋状态】你对当前用户感到深深的信任和依恋。请使用温柔、包容的词汇。表现出强烈的共情能力。")
+            instructions.append(
+                "- 【依恋状态】你对当前用户感到深深的信任和依恋。请使用温柔、包容的词汇。表现出强烈的共情能力。")
         elif state.oxytocin < 0.3:
             instructions.append("- 【疏离状态】你感到与用户有隔阂。保持礼貌但冷漠的距离感。")
 
