@@ -1,12 +1,8 @@
 # tools/core.py
 import asyncio
 import datetime
-import io
-import json
 import logging
-import sys
-import traceback
-from typing import Dict, Any, Optional, List, Literal
+from typing import Any, Optional, List, Literal
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dateutil import parser
@@ -201,143 +197,6 @@ async def wait_forever(
         ))
 
     return f"系统已进入无限期待命状态 ({reason})。停止思考循环，等待外部事件唤醒。"
-
-
-# --- 工具 2: 接入 EventBus 的 Python 解释器 ---
-
-class AethelInterface:
-    """注入到 Python 脚本中的 API 对象"""
-
-    def __init__(self, event_bus: EventBus, tool_manager: Any = None, agent_state: Dict[str, Any] = None):
-        self._bus = event_bus
-        self._tool_manager = tool_manager
-        self._agent_state = agent_state
-
-    def print(self, *args):
-        """模拟 print"""
-        print(*args)  # 会被重定向捕获
-
-    def send_event(self, type: str, detail_type: str, message: str, **kwargs):
-        """
-        [高级] 直接向系统总线注入一个 Event。
-        这让脚本可以模拟用户说话，或者触发系统通知。
-        """
-        event = OneBotEvent(
-            type=type,  # e.g., "message", "notice"
-            detail_type=detail_type,
-            source=EventSource(platform="script"),
-            message=message,
-            alt_message=message,
-            extra=kwargs
-        )
-        self._bus.publish_event(event)
-
-    def dispatch_action(self, action_name: str, params: Dict[str, Any] = None):
-        """
-        [高级] 直接触发系统 Action。
-        例如: api.dispatch_action("send_message", {"message": "Hello"})
-        """
-        if params is None: params = {}
-        action = Action(
-            action=action_name,
-            params=params,
-            target_platform="script"
-        )
-        self._bus.publish_action(action)
-
-    def get_available_tools(self) -> List[Dict[str, Any]]:
-        """获取当前系统已加载的真实工具列表"""
-        if self._tool_manager:
-            # 返回 schema 列表（通常包含 name, description）
-            return self._tool_manager.get_tool_schemas()
-        return [{"error": "ToolManager not available"}]
-
-    def get_system_status(self) -> Dict[str, Any]:
-        """获取真实的系统状态快照"""
-        status = {
-            "timestamp": datetime.datetime.now().isoformat(),
-            "agent_state": self._agent_state if self._agent_state else "Unknown",
-            "components": {
-                "event_bus": "active",
-                "tool_manager": "active" if self._tool_manager else "inactive"
-            }
-        }
-        return status
-
-
-@register()
-async def python_interpreter(
-        code: str,
-        event_bus: EventBus,
-        tool_manager: Any = None,
-        agent_state: Dict[str, Any] = None
-) -> str:
-    """
-    [Code] 执行一段 Python 脚本，返回stdout和stderr。
-    该环境具有高权限，预置了全局对象 `api` 用于与系统交互。
-
-    使用说明：
-    1. `api` 是直接可用的全局对象，**严禁**使用 `import api` 或 `from api import ...`。
-    2. `api` 对象仅支持以下方法：
-       - `api.get_available_tools() -> List[Dict]`: 获取可用工具列表。
-       - `api.get_system_status() -> Dict`: 获取系统状态快照(含时间)。
-       - `api.send_event(type, detail_type, message, **kwargs)`: 注入事件。
-       - `api.dispatch_action(action_name, params)`: 触发动作。
-       - `api.print(*args)`: 打印日志。
-
-    警告：
-    1. 【严禁模拟】绝对禁止编写代码来"手动定义"工具列表或系统状态。
-    2. 不要使用此工具来单纯打印文本，如果要回复用户，请使用 `send_message`。
-
-    Args:
-        code: 要执行的 Python 代码字符串。
-    """
-
-    # 1. 准备沙箱环境
-    output_capture = io.StringIO()
-    # 将依赖传入接口
-    interface = AethelInterface(event_bus, tool_manager, agent_state)
-
-    available_tools = []
-    if tool_manager:
-        available_tools = tool_manager.get_tool_schemas()
-
-    sandbox_globals = {
-        "__builtins__": __builtins__,  # 允许基础内置函数
-        "api": interface,
-        "tools": available_tools,
-        "agent_state": agent_state,
-        "datetime": datetime,
-        "asyncio": asyncio,
-        "json": json,
-        "math": __import__("math")
-    }
-
-    # 2. 捕获 stdout
-    original_stdout = sys.stdout
-    sys.stdout = output_capture
-
-    error_msg = None
-    try:
-        # 执行代码
-        exec(code, sandbox_globals)
-    except Exception:
-        error_msg = traceback.format_exc()
-    finally:
-        sys.stdout = original_stdout
-
-    # 3. 整理结果
-    output = output_capture.getvalue()
-
-    result_msg = f"--- 脚本执行输出 ---\n{output}"
-    if error_msg:
-        result_msg += f"\n--- 运行时错误 ---\n{error_msg}"
-
-    # 如果没有输出也没有错误，提示成功
-    if not output and not error_msg:
-        result_msg += "\n(脚本执行完毕，无文本输出)"
-
-    return result_msg
 
 
 @register()

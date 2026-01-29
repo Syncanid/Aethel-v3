@@ -224,3 +224,49 @@ class Hippocampus:
 
         except Exception as e:
             logger.error(f"记忆转换失败: {e}")
+
+    async def review_tool_mistake(self, tool_name: str, original_args: Dict, error: str, fixed_args: Dict):
+        """
+        [Learning] 从工具调用错误中提取经验 (One-shot Learning)。
+        """
+        try:
+            # 1. 构造 Prompt，让 LLM 总结规则
+            prompt = f"""
+Agent 在使用工具 `{tool_name}` 时失败并触发了自愈机制。
+请对比原始参数和修正后的参数，结合错误信息，总结一条简短的、通用的“避坑指南”。
+
+【错误信息】
+{error}
+
+【原始参数 (错误)】
+{json.dumps(original_args, ensure_ascii=False)}
+
+【修正参数 (正确)】
+{json.dumps(fixed_args, ensure_ascii=False)}
+
+【要求】
+输出一条简短的规则，格式为：“使用 {tool_name} 时，[注意事项]...”。
+例如：“使用 run_python_code 时，代码必须包含 print 输出才能被捕获。”
+"""
+            # 调用 LLM
+            resp = await self.api_client.create_chat_completion(
+                messages=[{"role": "user", "content": prompt}]
+            )
+            rule = resp["choices"][0]["message"]["content"].strip()
+
+            # 2. 存入语义记忆 (Semantic Memory)
+            # 使用特殊的 tag 或前缀，以便 RAG 检索工具知识时更容易匹配
+            memory_content = f"【工具经验】{rule}"
+
+            # 存入向量库 (假设 puid='system' 或 'global' 代表通用知识)
+            await self.vector_store.save_vector_memory(
+                SemanticMemory(content=memory_content),
+                puid="global_tool_rules"
+            )
+
+            logger.info(f"🧠 [Hippocampus] 习得新经验: {rule}")
+            return rule
+
+        except Exception as e:
+            logger.error(f"Failed to review tool mistake: {e}")
+            return None
