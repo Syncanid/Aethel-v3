@@ -44,7 +44,7 @@ class GenericAPIClient:
             await self.session.close()
 
     async def create_chat_completion(self, messages: list, model: str = None, tools: list = None,
-                                     schema: Dict = None) -> Dict:
+                                     schema: Dict = None, tool_choice: str = "auto") -> Dict:
         """核心 LLM 调用方法"""
         model = model or self.model
         endpoint = f"{self.base_url}/chat/completions"
@@ -56,7 +56,7 @@ class GenericAPIClient:
 
         if tools:
             payload["tools"] = tools
-            payload["tool_choice"] = "auto"
+            payload["tool_choice"] = tool_choice
 
         if schema:
             payload["response_format"] = {

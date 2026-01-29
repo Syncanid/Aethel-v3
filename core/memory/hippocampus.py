@@ -9,6 +9,7 @@ from core.infrastructure.config_loader import Config
 from core.infrastructure.database import Database
 from core.memory.schema import EpisodicMemory, SemanticMemory
 from core.memory.vector_store import VectorStore
+from core.evolution.mimicry import SocialMimicry
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +27,9 @@ class Hippocampus:
         self.is_running = False
 
         # 状态追踪
-        self.processed_ids: Set[int] = set()  # 记录已处理的消息对象ID
-        self.buffer: List[Dict] = []  # 待归档的临时缓冲区
-        self.last_activity_time = 0
+        self.processed_ids: Set[int] = set()
+        self.slow_lane_queue = asyncio.Queue()  # 待处理队列
+        self.mimicry = SocialMimicry(config, api_client)
 
         # 归档配置
         self.BUFFER_LIMIT = 5  # 积攒多少条触发
@@ -44,16 +45,68 @@ class Hippocampus:
         for msg in self.history_ref:
             self.processed_ids.add(id(msg))
 
+        # 并发启动两个独立循环
+        await asyncio.gather(
+            self._ingest_loop(),
+            self._dream_loop()
+        )
+
+    async def _ingest_loop(self):
+        """
+        [Fast Lane] 极速感知循环
+        只负责从 history 中识别新消息并推入队列，不进行重型计算。
+        """
         while self.is_running:
             try:
-                await self._scan_and_consolidate()
+                new_msgs = self._scan_delta()
+                for msg in new_msgs:
+                    await self.slow_lane_queue.put(msg)
             except Exception as e:
-                logger.error(f"海马体运行异常: {e}", exc_info=True)
-            await asyncio.sleep(10)  # 检查频率提高，因为直接读内存开销很小
+                logger.error(f"Ingest loop error: {e}")
 
-    async def _scan_and_consolidate(self):
-        """扫描历史记录并处理"""
-        current_time = asyncio.get_event_loop().time()
+            await asyncio.sleep(2)  # 高频检查 (2s)
+
+    async def _dream_loop(self):
+        """
+        [Slow Lane] 造梦循环
+        负责记忆整理 和 社会化进化。
+        """
+        buffer = []
+        last_dream_time = asyncio.get_event_loop().time()
+
+        while self.is_running:
+            try:
+                # 1. 尝试从队列获取消息 (带超时，保证即使没有新消息也能检查超时归档)
+                try:
+                    msg = await asyncio.wait_for(self.slow_lane_queue.get(), timeout=5)
+                    buffer.append(msg)
+                except asyncio.TimeoutError:
+                    pass
+
+                # 2. 检查触发条件
+                current_time = asyncio.get_event_loop().time()
+                is_buffer_full = len(buffer) >= self.BUFFER_LIMIT
+                is_timeout = (current_time - last_dream_time > self.SILENCE_TIMEOUT) and len(buffer) > 0
+
+                if is_buffer_full or is_timeout:
+                    # 触发深层处理
+                    logger.info(f"💤 进入梦境处理 (Items: {len(buffer)})")
+
+                    # 任务 A: 记忆归档
+                    await self._consolidate_memory(list(buffer))
+
+                    # 任务 B: 社会化进化 (Mimicry)
+                    await self.mimicry.evolve(list(buffer))
+
+                    buffer.clear()
+                    last_dream_time = current_time
+
+            except Exception as e:
+                logger.error(f"Dream loop error: {e}")
+                await asyncio.sleep(5)
+
+    def _scan_delta(self) -> List[Dict]:
+        """扫描增量消息 (仅在内存中操作，极快)"""
         new_msgs = []
 
         # 1. 扫描增量消息
@@ -61,46 +114,25 @@ class Hippocampus:
         # 我们遍历当前的 history，找出未见过的对象
         current_history_ids = set()
 
-        for msg in list(self.history_ref):  # 浅拷贝防止迭代时修改
+        # 遍历当前历史快照
+        for msg in list(self.history_ref):
             msg_id = id(msg)
             current_history_ids.add(msg_id)
 
-            # 过滤掉系统提示和工具原始输出（通常只关注对话流）
-            # 根据需求，这里保留 user 和 assistant，以及重要的 tool 结果
             if msg_id not in self.processed_ids:
-                # 1. 检查 metadata 中的 ephemeral 标记
+                # 过滤逻辑
                 metadata = msg.get("metadata", {})
-                is_ephemeral = metadata.get("ephemeral", False)
-
-                # 2. 如果是瞬时消息 (如入群通知、生理驱动)，直接跳过，不放入缓冲区
-                if is_ephemeral:
-                    self.processed_ids.add(msg_id)  # 标记为已处理，防止反复检查
+                if metadata.get("ephemeral", False):
+                    self.processed_ids.add(msg_id)
                     continue
 
-                # 3. 正常的角色检查
                 if msg.get("role") in ["user", "assistant"]:
                     new_msgs.append(msg)
                     self.processed_ids.add(msg_id)
-                    self.last_activity_time = current_time
 
-        # 清理已修剪的消息 ID，防止 Set 无限增长
+        # 清理已不存在的消息ID (防止内存泄漏)
         self.processed_ids.intersection_update(current_history_ids)
-
-        # 2. 加入缓冲区
-        if new_msgs:
-            self.buffer.extend(new_msgs)
-
-        # 3. 检查触发条件
-        should_archive = False
-        if len(self.buffer) >= self.BUFFER_LIMIT:
-            should_archive = True
-        elif len(self.buffer) > 0 and (current_time - self.last_activity_time > self.SILENCE_TIMEOUT):
-            should_archive = True
-
-        if should_archive:
-            logger.info(f"触发记忆归档: {len(self.buffer)} 条消息")
-            await self._consolidate_memory(list(self.buffer))
-            self.buffer.clear()
+        return new_msgs
 
     async def _consolidate_memory(self, buffer: List[Dict]):
         """
@@ -132,7 +164,7 @@ class Hippocampus:
 对于 Semantic 记忆，如果它不属于特定用户（是通用知识），`puid` 可填 "global"。
 """
         # 简化输入内容，只发送 role 和 content
-        input_data = [{"role": m["role"], "content": m["content"]} for m in buffer]
+        input_data = [{"role": m["role"], "content": m.get("content", "")} for m in buffer]
         input_text = json.dumps(input_data, ensure_ascii=False)
 
         try:

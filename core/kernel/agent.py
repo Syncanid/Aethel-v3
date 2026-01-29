@@ -1,3 +1,4 @@
+# core/kernel/agent.py
 import asyncio
 import json
 import logging
@@ -13,6 +14,7 @@ from core.infrastructure.database import Database
 from core.io.event_bus import EventBus
 from core.io.event_schema import OneBotEvent, Action, DetailType, EventType
 from core.kernel.prompt import PromptManager
+from core.kernel.attention import AttentionFilter, ReactionType
 from core.limbic.manager import LimbicManager
 from core.memory.hippocampus import Hippocampus
 from core.memory.infinite_context import InfiniteContextManager
@@ -43,6 +45,13 @@ class AutonomousAgent:
         self.last_response_content = ""  # 用于死锁检测
         self.last_observation_text = None
         self.consecutive_idle_count = 0  # 空转计数器
+
+        # --- 初始化注意力门控系统 ---
+        self.attention = AttentionFilter(config, self.prompt_manager, self.api_client)
+
+        # --- 强制休眠标记 ---
+        # 用于在决定“观察”后阻止空转思考
+        self.force_sleep = False
 
         # --- 初始化工具管理器 (注入依赖) ---
         self.tool_manager = ToolManager(
@@ -164,8 +173,15 @@ class AutonomousAgent:
                 # --- A. 感知阶段 (Perception) ---
                 event = None
 
-                # 检查缓冲区（非阻塞优先）
-                if not self.incoming_events.empty():
+                # 强制休眠逻辑
+                # 如果系统判定当前应当“安静等待”且不是手动休眠模式
+                if self.force_sleep and not self.is_sleeping:
+                    # 阻塞式等待：直到有新事件才唤醒，彻底避免空转
+                    event = await self.incoming_events.get()
+                    self.force_sleep = False  # 收到事件，解除强制休眠
+
+                # 正常非阻塞/超时获取逻辑
+                elif not self.incoming_events.empty():
                     event = self.incoming_events.get_nowait()
                     self.is_sleeping = False
                 elif self.is_sleeping:
@@ -181,7 +197,10 @@ class AutonomousAgent:
                     except asyncio.TimeoutError:
                         pass
 
+                should_act = True  # 默认行动
+
                 if event:
+                    # 1. 处理事件 (存入记忆/边缘系统感知)
                     await self._process_incoming_event(event)
                     # 如果收到新事件，重置空转计数器
                     self.consecutive_idle_count = 0
@@ -192,6 +211,29 @@ class AutonomousAgent:
                             self.wakeup_job_id = None
                         except:
                             pass
+
+                    # === 语义门控 ===
+                    # 2. 判断是否需要响应
+                    reaction = await self.attention.evaluate(event)
+
+                    if reaction in [ReactionType.OBSERVE, ReactionType.IGNORE]:
+                        logger.info(f"🤐 [Observer] 决定保持沉默 (已存入记忆): {event.id}")
+                        should_act = False  # 阻止触发 Thought 阶段
+
+                        # 如果当前没有正在进行的任务 (current_goal为空)，
+                        # 且决定保持沉默，则进入强制休眠，防止下一轮循环把刚才的消息当做上下文进行“自主思考”。
+                        current_goal = self.scratchpad.get("current_goal")
+                        if not current_goal:
+                            self.force_sleep = True
+                            logger.debug("💤 进入待机模式，等待新事件...")
+                    else:
+                        logger.info(f"🗣️ [Responder] 决定介入 ({reaction.value}): {event.id}")
+                        should_act = True
+
+                # 如果有事件但决定不思考 (Observe)，或者无事件且无必要思考
+                # 但为了逻辑严谨，如果 event 存在但 should_act=False，我们必须 continue
+                if event and not should_act:
+                    continue
 
                 # --- B. 思考与决策阶段 (Thought) ---
 
@@ -233,7 +275,7 @@ class AutonomousAgent:
                 )
 
                 # 更新历史记录中的 System Prompt
-                if self.history and self.history[0]["role"] == "system":
+                if self.history[0]["role"] == "system":
                     self.history[0]["content"] = final_system_prompt
                 else:
                     self.history.insert(0, {"role": "system", "content": final_system_prompt})
@@ -241,8 +283,13 @@ class AutonomousAgent:
                 with open("data/messages_in_memory.txt", "w", encoding="utf-8") as f:
                     f.write(json.dumps(self.history, ensure_ascii=False, indent=4))
 
+                with open("data/prompt_in_memory.txt", "w", encoding="utf-8") as f:
+                    f.write(final_system_prompt)
+
                 # 调用 LLM
                 response_msg = await self._call_llm()
+
+                # 解析 LLM 响应
                 content_str = response_msg.get("content")
 
                 if isinstance(content_str, str):
@@ -253,6 +300,7 @@ class AutonomousAgent:
                 else:
                     content_str = "{}"
 
+                # 处理原生 Tool Calls
                 native_tool_calls = response_msg.get("tool_calls", [])
                 # 注入 Assistant 历史记录
                 # 如果存在原生 tool_calls，必须保留完整结构，否则后续 role: tool 会报错
@@ -264,8 +312,9 @@ class AutonomousAgent:
                         msg_entry["content"] = ""
                     self.history.append(msg_entry)
                 else:
-                    # Schema 模式：仅存入文本内容
+                    # Schema 模式回填
                     try:
+                        # 尝试格式化 JSON 以美观存储
                         if content_str.strip().startswith("{"):
                             formatted_content = json.dumps(json.loads(content_str), ensure_ascii=False)
                             self.history.append({"role": "assistant", "content": formatted_content})
@@ -295,13 +344,26 @@ class AutonomousAgent:
                 if content_str:
                     try:
                         parsed_data = json.loads(content_str)
-                        thought_content = parsed_data.get("thought", "")
+
+                        # 提取双层信息
+                        monologue = parsed_data.get("inner_monologue", {})
+
+                        # 构造思考日志
+                        emotion = monologue.get("emotion_check", "Neutral")
+                        plan = monologue.get("planning", "No plan")
+                        thought_display = f"[{emotion}] {plan}"
 
                         # 更新 Scratchpad
                         new_scratchpad = parsed_data.get("scratchpad", None)
                         if new_scratchpad and isinstance(new_scratchpad, dict):
                             self.scratchpad = new_scratchpad
                             self.tool_manager.agent_state = self.scratchpad
+
+                        # 广播思考过程 (EventBus)
+                        self.event_bus.publish_action(Action(
+                            action="broadcast_log",
+                            params={"content": f"🧠 心流: {thought_display}"}
+                        ))
 
                         # 提取 Schema Tool Calls
                         schema_calls = parsed_data.get("tool_calls", [])
@@ -419,11 +481,12 @@ class AutonomousAgent:
 
                 # 空转检测与熔断
                 else:
+                    max_allowed_idle = 2
                     # 没有执行任何工具
                     self.consecutive_idle_count += 1
-                    logger.warning(f"⚠️ 空转检测: {self.consecutive_idle_count}/3")
+                    logger.warning(f"⚠️ 空转检测: {self.consecutive_idle_count}/{max_allowed_idle}")
 
-                    if self.consecutive_idle_count >= 3:
+                    if self.consecutive_idle_count >= max_allowed_idle:
                         logger.warning("🚫 触发空转熔断：强制注入警告。")
                         self.history.append({
                             "role": "user",
@@ -629,10 +692,28 @@ class AutonomousAgent:
 
         # 基础结构
         properties = {
-            "thought": {
-                "type": "string",
-                "description": "思考过程和行动规划。"
+            # 1. 内心独白层
+            "inner_monologue": {
+                "type": "object",
+                "description": "在回复前的思考过程。",
+                "properties": {
+                    "emotion_check": {
+                        "type": "string",
+                        "description": "自检当前的生理状态和情绪基调。"
+                    },
+                    "intention": {
+                        "type": "string",
+                        "description": "明确当前的行动意图。例如：'安抚用户情绪'、'执行搜索任务' 或 '结束对话'。"
+                    },
+                    "planning": {
+                        "type": "string",
+                        "description": "具体的思维链推理过程。"
+                    }
+                },
+                "required": ["emotion_check", "intention", "planning"],
+                "additionalProperties": False
             },
+            # 2. 状态层
             "scratchpad": {
                 "type": "object",
                 "properties": {
@@ -658,7 +739,7 @@ class AutonomousAgent:
             }
         }
 
-        required_fields = ["thought", "scratchpad"]
+        required_fields = ["inner_monologue", "scratchpad"]
 
         # 根据配置决定是否将 tool_calls 注入 Schema
         if use_schema_tools:
@@ -697,7 +778,8 @@ class AutonomousAgent:
         response = await self.api_client.create_chat_completion(
             messages=sanitized_history,
             tools=schemas if schemas else None,
-            schema=thought_structure
+            schema=thought_structure,
+            tool_choice="none" if use_schema_tools else "auto"
         )
 
         return response["choices"][0]["message"]
