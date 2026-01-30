@@ -10,7 +10,7 @@ from core.infrastructure.config_loader import Config
 
 logger = logging.getLogger(__name__)
 
-# 定义 SQLite 表结构 (源自 v2 memory_schema.py)
+# 定义 SQLite 表结构
 SCHEMA_SQL = {
     "core_memory": """
                    CREATE TABLE IF NOT EXISTS core_memory
@@ -33,35 +33,49 @@ SCHEMA_SQL = {
                    )
                        );
                    """,
-    "memory_archival_status": """
-                              CREATE TABLE IF NOT EXISTS memory_archival_status
-                              (
-                                  user_id
-                                  TEXT,
-                                  group_id
-                                  TEXT,
-                                  last_processed_seq
-                                  INTEGER,
-                                  last_archival_run
-                                  REAL,
-                                  PRIMARY
-                                  KEY
-                              (
-                                  user_id,
-                                  group_id
-                              )
-                                  );
-                              """
+    "neuro_states": """
+                    CREATE TABLE IF NOT EXISTS neuro_states
+                    (
+                        user_id
+                        TEXT
+                        PRIMARY
+                        KEY,
+                        data_json
+                        TEXT,
+                        last_update
+                        REAL
+                    )
+                    """,
+    "social_users": """
+                    CREATE TABLE IF NOT EXISTS social_users
+                    (
+                        puid
+                        TEXT
+                        PRIMARY
+                        KEY,
+                        platform
+                        TEXT,
+                        user_id
+                        TEXT,
+                        nickname
+                        TEXT,
+                        data_json
+                        TEXT,
+                        last_seen
+                        REAL
+                    )
+                    """
 }
 
 
 class Database:
     def __init__(self, config: Config):
         self.config = config
-        self.db_path = "data/storage.db"
-        self.vector_path = "data/vector_store"
+        self.db_path = config.get("storage.db_path", "data/storage.db")
+        self.vector_path = config.get("storage.vector_path", "data/vector_store")
 
-        os.makedirs("data", exist_ok=True)
+        # 确保目录存在
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         os.makedirs(self.vector_path, exist_ok=True)
 
         # 初始化 ChromaDB 客户端

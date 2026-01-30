@@ -3,6 +3,8 @@ import logging
 import os
 from typing import List, Dict, Any
 
+import aiofiles
+
 from core.infrastructure.api_client import GenericAPIClient
 from core.memory.schema import SemanticMemory
 from core.memory.vector_store import VectorStore
@@ -27,12 +29,18 @@ class KnowledgeIngestor:
         logger.info(f"开始摄入文档: {filename}")
 
         # 1. 读取内容
+        content = ""
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
+            async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
+                content = await f.read()
         except UnicodeDecodeError:
-            with open(file_path, 'r', encoding='gbk', errors='ignore') as f:
-                content = f.read()
+            # 备选编码读取
+            try:
+                async with aiofiles.open(file_path, 'r', encoding='gbk', errors='ignore') as f:
+                    content = await f.read()
+            except Exception as e:
+                logger.error(f"文件读取编码错误: {e}")
+                return 0
 
         if not content.strip():
             return 0

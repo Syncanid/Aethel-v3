@@ -4,6 +4,8 @@ import os
 import shutil
 from typing import Literal, Optional
 
+import aiofiles
+
 from core.tool_manager.registry import register
 
 logger = logging.getLogger(__name__)
@@ -69,8 +71,8 @@ async def read_file(path: str, start_line: int = 1, end_line: int = -1) -> str:
         return f"错误: '{path}' 是一个目录。"
 
     try:
-        with open(path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
+        async with aiofiles.open(path, 'r', encoding='utf-8') as f:
+            lines = await f.readlines()
 
         total_lines = len(lines)
         if end_line == -1: end_line = total_lines
@@ -108,29 +110,29 @@ async def edit_file(
         old_content: (仅 replace 模式) 要被替换的旧文本。
     """
     try:
-        # 1. 覆盖模式 (Write)
+        # 1. 覆盖模式
         if mode == "overwrite":
             dir_path = os.path.dirname(path)
             if dir_path: os.makedirs(dir_path, exist_ok=True)
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write(content)
+            async with aiofiles.open(path, 'w', encoding='utf-8') as f:
+                await f.write(content)
             return f"文件 '{path}' 已覆盖写入。"
 
-        # 2. 追加模式 (Append)
+        # 2. 追加模式
         if mode == "append":
-            with open(path, 'a', encoding='utf-8') as f:
-                f.write(content)
+            async with aiofiles.open(path, 'a', encoding='utf-8') as f:
+                await f.write(content)
             return f"内容已追加到 '{path}' 末尾。"
 
         # 以下模式需要先读取文件
         if not os.path.exists(path):
             return f"错误: 文件 '{path}' 不存在，无法执行 insert/replace 操作。"
 
-        with open(path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
+        async with aiofiles.open(path, 'r', encoding='utf-8') as f:
+            lines = await f.readlines()
             full_text = "".join(lines)
 
-        # 3. 插入模式 (Insert)
+        # 3. 插入模式
         if mode == "insert":
             if line_number is None:
                 return "错误: insert 模式必须提供 'line_number'。"
@@ -142,11 +144,11 @@ async def edit_file(
             if not content.endswith('\n'): content += '\n'
 
             lines.insert(idx, content)
-            with open(path, 'w', encoding='utf-8') as f:
-                f.writelines(lines)
+            async with aiofiles.open(path, 'w', encoding='utf-8') as f:
+                await f.writelines(lines)
             return f"内容已插入到 '{path}' 第 {line_number} 行之后。"
 
-        # 4. 替换模式 (Replace)
+        # 4. 替换模式
         if mode == "replace":
             if not old_content:
                 return "错误: replace 模式必须提供 'old_content'。"
@@ -155,8 +157,8 @@ async def edit_file(
                 return f"错误: 在文件中未找到指定的 'old_content'。"
 
             new_text = full_text.replace(old_content, content)
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write(new_text)
+            async with aiofiles.open(path, 'w', encoding='utf-8') as f:
+                await f.write(new_text)
             return f"文件 '{path}' 中的内容已替换。"
 
         return f"错误: 未知的模式 '{mode}'。"

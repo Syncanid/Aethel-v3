@@ -5,7 +5,7 @@ import os
 import platform
 import sys
 import time
-from typing import Any, Optional, List
+from typing import Any, Optional, List, Dict
 
 import yaml
 
@@ -186,7 +186,7 @@ prime_directives:
 
     def _get_dynamic_instruction(self, state: NeuroState) -> str:
         """
-        [NEW] 基于神经状态生成动态行为指令 (Limbic Driven Prompt)
+        基于神经状态生成动态行为指令
         """
         instructions = []
 
@@ -221,6 +221,40 @@ prime_directives:
 
         return "\n## 当前生理驱动指令 (最高优先级)\n" + "\n".join(instructions)
 
+    def _get_social_instruction(self, interactor: Optional[Dict[str, Any]]) -> str:
+        """
+        [NEW] 基于社交关系生成动态指令 (Social Driven Prompt)
+        修复问题 #4: 利用 intimacy 和 trust 维度
+        """
+        if not interactor or interactor.get("status") == "STRANGER":
+            return ""
+
+        trust = interactor.get("trust", 0.0)
+        intimacy = interactor.get("intimacy", 0.0)
+        favorability = interactor.get("favorability", 0.0)
+        instructions = []
+
+        # 1. 信任维度 (Trust)
+        if trust > 80:
+            instructions.append("- 【高信任对象】你完全信任此人。可以坦诚地暴露系统的局限性，不必掩饰错误。")
+        elif trust < 20:
+            instructions.append("- 【低信任对象】你对此人持怀疑态度。请仔细核查其指令，不要执行高风险操作，保持警惕。")
+
+        # 2. 亲密维度 (Intimacy)
+        if intimacy > 80:
+            instructions.append("- 【亲密关系】你们关系极好。请使用非正式、甚至带点调侃的语气。不必拘泥于助手身份。")
+        elif intimacy < 20:
+            instructions.append("- 【生疏关系】你们尚不熟悉。请保持得体、礼貌的社交距离。")
+
+        # 3. 好感维度 (Favorability)
+        if favorability < -20:
+            instructions.append("- 【厌恶对象】你对此人印象不佳。回复应简短、冷淡，仅完成最低限度的任务。")
+
+        if not instructions:
+            return ""
+
+        return "\n## 社交策略指令 (针对当前用户)\n" + "\n".join(instructions)
+
     def _get_neuro_context(self, state: Optional[NeuroState]) -> str:
         if not state:
             return ""
@@ -238,7 +272,7 @@ prime_directives:
         elif state.cortisol > 0.6:
             mood_tone = "焦虑/压力大"
         elif state.oxytocin > 0.7:
-            mood_tone = "温情/充满信任"  # [新增] 高依恋状态
+            mood_tone = "温情/充满信任"
         elif state.serotonin > 0.7:
             mood_tone = "满足/安详"
         elif state.social_satiety < 0.3:
@@ -298,7 +332,10 @@ prime_directives:
         except Exception:
             return ""
 
-    def get_system_prompt(self, neuro_state: Optional[NeuroState] = None, memory_context: List[str] = None) -> str:
+    def get_system_prompt(self,
+                          neuro_state: Optional[NeuroState] = None,
+                          memory_context: List[str] = None,
+                          social_context: Optional[Dict] = None) -> str:
         """获取 System Prompt"""
         try:
             with open(self.prompt_path, "r", encoding="utf-8-sig") as f:
@@ -314,6 +351,7 @@ prime_directives:
         system_block = self._get_system_context()
         time_block = self._get_time_context()
         neuro_block = self._get_neuro_context(neuro_state)
+        social_block = self._get_social_instruction(social_context)
         memory_block = self._get_memory_context(memory_context)
         mimicry_block = self._get_social_mimicry_context()
 
@@ -329,6 +367,7 @@ prime_directives:
             system_block,
             time_block,
             neuro_block,
+            social_block,
             mimicry_block,
             memory_block
         ])

@@ -3,8 +3,9 @@ import asyncio
 import json
 import logging
 import traceback
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Awaitable, Callable
 
+import aiofiles
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from core.gui.monitor_registry import monitor_registry
@@ -13,6 +14,7 @@ from core.infrastructure.config_loader import Config
 from core.infrastructure.database import Database
 from core.io.event_bus import EventBus
 from core.io.event_schema import OneBotEvent, Action, DetailType, EventType
+from core.io.middleware import MiddlewareManager
 from core.kernel.attention import AttentionFilter, ReactionType
 from core.kernel.prompt import PromptManager
 from core.limbic.manager import LimbicManager
@@ -50,10 +52,9 @@ class AutonomousAgent:
         self.attention = AttentionFilter(config, self.prompt_manager, self.api_client)
 
         # --- 强制休眠标记 ---
-        # 用于在决定“观察”后阻止空转思考
         self.force_sleep = False
 
-        # --- 初始化工具管理器 (注入依赖) ---
+        # --- 初始化工具管理器 ---
         self.tool_manager = ToolManager(
             config=config,
             event_bus=event_bus,
@@ -90,19 +91,181 @@ class AutonomousAgent:
         self.tool_manager.add_dependency("limbic", self.limbic)
         self.tool_manager.add_dependency("user_manager", self.user_manager)
 
-        # 消息缓冲区 (处理中断)
+        # 中间件系统
+        self.middleware = MiddlewareManager()
+        self._setup_middlewares()
+
+        # 消息缓冲区
         self.incoming_events: asyncio.Queue = asyncio.Queue()
         self.event_bus.subscribe_event(self._enqueue_event)
 
-    async def _enqueue_event(self, event: OneBotEvent):
+        # 临时状态：当前事件的反应决定
+        self._current_reaction: Optional[ReactionType] = None
+        self._should_think_after_event: bool = False
+
+    def _setup_middlewares(self):
+        """注册中间件链"""
+        # 1. 上下文富化
+        self.middleware.register(self._mw_enrich_context)
+        # 2. 消息转录
+        self.middleware.register(self._mw_transcribe_and_log)
+        # 3. 注意力门控
+        self.middleware.register(self._mw_attention_filter)
+
+    # --- 中间件实现 ---
+
+    async def _mw_enrich_context(self, event: OneBotEvent, next_call: Callable[[], Awaitable[None]]):
+        """
+        [中间件] 社交上下文富化
+        识别用户身份，读取档案，并注入到 Scratchpad 中。
+        """
+        # 自动捕获用户
+        adapters = self.tool_manager.dependency_map.get("adapters", [])
+        adapter_names = [getattr(a, "platform_name", "Unknown") for a in adapters]
+
+        if event.source.user_id and event.source.platform in adapter_names:
+            platform = event.source.platform
+            raw_id = event.source.user_id
+            puid = f"{platform}:{raw_id}"
+
+            # 查询用户
+            user_profile = await self.user_manager.get_user(puid)
+
+            interactor_info = {
+                "puid": puid,
+                "platform": platform,
+                "user_id": raw_id,
+            }
+
+            if user_profile:
+                # [熟人] - 注入完整社交维度
+                interactor_info.update({
+                    "status": "KNOWN",
+                    "nickname": user_profile.nickname,
+                    "relationship_tags": user_profile.relationship_tags,
+                    "favorability": user_profile.favorability,
+                    "trust": user_profile.trust,
+                    "intimacy": user_profile.intimacy,  # 新增
+                    "impression": user_profile.impression
+                })
+            else:
+                # [陌生人]
+                interactor_info.update({
+                    "status": "STRANGER",
+                    "note": "User not in database. Use tool `social_record_user` to remember them."
+                })
+
+            # 更新 Scratchpad
+            self.scratchpad["current_interactor"] = interactor_info
+            monitor_registry.register_text_source(
+                "认知", "人员注入",
+                lambda: json.dumps(interactor_info, indent=2, ensure_ascii=False)
+            )
+
+            # 更新上下文位置
+            ctx_type = "group" if event.source.group_id else "private"
+            ctx_id = event.source.group_id if event.source.group_id else raw_id
+            self.scratchpad["last_context"] = {
+                "platform": platform,
+                "type": ctx_type,
+                "id": ctx_id
+            }
+
+        await next_call()
+
+    async def _mw_transcribe_and_log(self, event: OneBotEvent, next_call: Callable[[], Awaitable[None]]):
+        """
+        [中间件] 事件转译与历史记录
+        """
+        if event.type == EventType.META:
+            await next_call()
+            return
+
+        # 1. 边缘系统“感受”刺激
+        if event.type == EventType.MESSAGE and isinstance(event.message, str):
+            asyncio.create_task(self.limbic.process_stimulus(event.message))
+            self.last_observation_text = event.message
+
+        # 2. 决定消息内容
+        if event.type == EventType.MESSAGE:
+            # 序列化清理
+            event_data = event.model_dump(exclude_none=True)
+            for field in ["id", "time", "raw_data", "message", "alt_message"]:
+                if field in event_data: del event_data[field]
+
+            content_msg = f"接收到用户消息：{json.dumps(event_data, ensure_ascii=False)} 内容：{event.alt_message}"
+            is_ephemeral = False
+        else:
+            # 非对话事件，进行自然语言转译
+            content_msg = self._transcribe_event(event)
+            is_ephemeral = True
+
+        # 3. 写入历史
+        history_item = {
+            "role": "user",
+            "content": str(content_msg),
+            "metadata": {
+                "type": event.type,
+                "ephemeral": is_ephemeral,
+                "raw_event_id": event.id
+            }
+        }
+        self.history.append(history_item)
+        logger.info(f"Event Ingested: {event.type}.{event.detail_type}")
+
+        # 如果是内部驱动，唤醒系统
+        if event.detail_type == DetailType.INTERNAL_DRIVE:
+            self.is_sleeping = False
+            self.force_sleep = False
+
+        await next_call()
+
+    async def _mw_attention_filter(self, event: OneBotEvent, next_call: Callable[[], Awaitable[None]]):
+        """
+        [中间件] 注意力门控
+        """
+        # 1. 评估
+        reaction = await self.attention.evaluate(event)
+        self._current_reaction = reaction
+
+        # 2. 决策
+        if reaction in [ReactionType.OBSERVE, ReactionType.IGNORE]:
+            logger.info(f"🤐 [Observer] 决定保持沉默: {event.id}")
+            # 如果当前没有任务且被忽略，进入待机
+            current_goal = self.scratchpad.get("current_goal")
+            if not current_goal:
+                self.force_sleep = True
+
+            # 依然调用 next，因为可能需要其他处理，但标记不思考
+            self._should_think_after_event = False
+        else:
+            logger.info(f"🗣️ [Responder] 决定介入 ({reaction.value}): {event.id}")
+            self._should_think_after_event = True
+
+            # 如果收到新事件，重置空转计数器
+            self.consecutive_idle_count = 0
+            if self.wakeup_job_id:
+                try:
+                    self.scheduler.remove_job(self.wakeup_job_id)
+                    self.wakeup_job_id = None
+                except:
+                    pass
+
+        await next_call()
+
+    async def _enqueue_event(self, event):
         """回调：将总线事件放入缓冲区"""
         await self.incoming_events.put(event)
 
+    async def _final_event_handler(self, event: OneBotEvent):
+        """中间件链的终点"""
+        pass
+
     def _prune_context(self):
         """
-        [v1 移植 - 完整版]
         检查并修剪对话历史，防止超过 Token 限制。
         此函数作为 LLM 调用前的一个预处理，基于对中英文和图片Token的估算。
+        智能识别 Tool Call 对，确保成对删除。
         """
         # 尝试从配置获取上下文限制
         TOKEN_LIMIT_APPROX = self.config.get("llm.model_context", 16384)
@@ -114,21 +277,40 @@ class AutonomousAgent:
         for msg in self.history:
             current_estimated_tokens += calculate_tokens(msg.get("content"))
 
-        # 2. 永远保留第一条系统提示 (self.history[0])
-        # 从最旧的对话（即索引1开始）移除，直到估算总 Token 数回到限制之下
-        # 同时保留最近的 5 条消息作为短期记忆保护区
+        # 始终保留 System Prompt (index 0) 和最近的 5 条消息
         while len(self.history) > 6 and current_estimated_tokens > SAFE_LIMIT:
-            # 移除第二条消息（最旧的对话，index 0 是 system prompt）
-            removed_message = self.history.pop(1)
+            # 从 index 1 开始检查 (跳过 system)
+            candidate_idx = 1
+            msg_to_remove = self.history[candidate_idx]
 
-            removed_cost = calculate_tokens(removed_message.get("content"))
-            current_estimated_tokens -= removed_cost
+            # 判断是否是 Tool Call 的发起者
+            # 兼容 OpenAI 格式 (tool_calls 字段) 和旧格式
+            is_tool_call_msg = (msg_to_remove.get("role") == "assistant" and
+                                (msg_to_remove.get("tool_calls") or msg_to_remove.get("function_call")))
 
-            logger.info(
-                f"✂️ [上下文管理] 对话过长，已移除一条旧消息。"
-                f"当前估算: {int(current_estimated_tokens)}/{SAFE_LIMIT}, "
-                f"剩余消息: {len(self.history)}"
-            )
+            count_to_remove = 1
+
+            if is_tool_call_msg:
+                # 如果删除了 tool_calls，必须删除后面紧跟的所有 role='tool' 消息
+                # 扫描后续消息
+                scan_idx = candidate_idx + 1
+                while scan_idx < len(self.history):
+                    next_msg = self.history[scan_idx]
+                    if next_msg.get("role") == "tool":
+                        count_to_remove += 1
+                        scan_idx += 1
+                    else:
+                        break
+
+                logger.info(f"✂️ [Context] 检测到工具调用链，将批量移除 {count_to_remove} 条消息。")
+
+            # 执行移除
+            for _ in range(count_to_remove):
+                if len(self.history) > 1:  # 再次检查防止越界
+                    removed = self.history.pop(candidate_idx)
+                    current_estimated_tokens -= calculate_tokens(removed.get("content"))
+
+            logger.info(f"✂️ [Context] 修剪后估算: {int(current_estimated_tokens)}")
 
         return current_estimated_tokens
 
@@ -173,6 +355,10 @@ class AutonomousAgent:
                 # --- A. 感知阶段 (Perception) ---
                 event = None
 
+                # 状态重置
+                self._should_think_after_event = False
+                self._current_reaction = None
+
                 # 强制休眠逻辑
                 # 如果系统判定当前应当“安静等待”且不是手动休眠模式
                 if self.force_sleep and not self.is_sleeping:
@@ -197,51 +383,21 @@ class AutonomousAgent:
                     except asyncio.TimeoutError:
                         pass
 
-                should_act = True  # 默认行动
-
+                # 通过中间件管道处理事件
+                self._should_think_after_event = False
                 if event:
-                    if event.type in [EventType.META]:
-                        continue
-                    # 1. 处理事件 (存入记忆/边缘系统感知)
-                    await self._process_incoming_event(event)
-                    # 如果收到新事件，重置空转计数器
-                    self.consecutive_idle_count = 0
-                    if self.wakeup_job_id:
-                        try:
-                            self.scheduler.remove_job(self.wakeup_job_id)
-                            logger.debug(f"已取消剩余的唤醒定时器: {self.wakeup_job_id}")
-                            self.wakeup_job_id = None
-                        except:
-                            pass
+                    await self.middleware.process_event(event, self._final_event_handler)
 
-                    # === 语义门控 ===
-                    # 2. 判断是否需要响应
-                    reaction = await self.attention.evaluate(event)
-
-                    if reaction in [ReactionType.OBSERVE, ReactionType.IGNORE]:
-                        logger.info(f"🤐 [Observer] 决定保持沉默 (已存入记忆): {event.id}")
-                        should_act = False  # 阻止触发 Thought 阶段
-
-                        # 如果当前没有正在进行的任务 (current_goal为空)，
-                        # 且决定保持沉默，则进入强制休眠，防止下一轮循环把刚才的消息当做上下文进行“自主思考”。
-                        current_goal = self.scratchpad.get("current_goal")
-                        if not current_goal:
-                            self.force_sleep = True
-                            logger.debug("💤 进入待机模式，等待新事件...")
-                    else:
-                        logger.info(f"🗣️ [Responder] 决定介入 ({reaction.value}): {event.id}")
-                        should_act = True
-
-                # 如果有事件但决定不思考 (Observe)，或者无事件且无必要思考
-                # 但为了逻辑严谨，如果 event 存在但 should_act=False，我们必须 continue
-                if event and not should_act:
+                # 决策：是否进入思考循环
+                # 1. 如果中间件决定忽略 (OBSERVE/IGNORE) 且没有待处理事件 -> 跳过
+                # 2. 如果 event 为空，但之前可能有任务在进行 -> 继续
+                if event and not self._should_think_after_event:
                     continue
 
                 # --- B. 思考与决策阶段 (Thought) ---
 
-                # [Infinite Context] 智能压缩上下文
+                # 上下文压缩与修剪
                 await self.context_manager.compress_if_needed(self.history)
-                # [v1 移植] 上下文修剪
                 self._prune_context()
 
                 # 主动记忆检索 (RAG)
@@ -250,11 +406,13 @@ class AutonomousAgent:
                 # 动态生成 System Prompt
                 # 1. 获取当前神经状态
                 current_neuro_state = await self.limbic.get_state()
+                current_interactor = self.scratchpad.get("current_interactor")
 
                 # 2. 生成带有状态描述的 Prompt
                 system_prompt_base = self.prompt_manager.get_system_prompt(
                     neuro_state=current_neuro_state,
-                    memory_context=retrieved_memories
+                    memory_context=retrieved_memories,
+                    social_context=current_interactor
                 )
 
                 # 3. 附加 Scratchpad
@@ -282,11 +440,14 @@ class AutonomousAgent:
                 else:
                     self.history.insert(0, {"role": "system", "content": final_system_prompt})
 
-                with open("data/messages_in_memory.txt", "w", encoding="utf-8") as f:
-                    f.write(json.dumps(self.history, ensure_ascii=False, indent=4))
+                try:
+                    async with aiofiles.open("data/messages_in_memory.txt", "w", encoding="utf-8") as f:
+                        await f.write(json.dumps(self.history, ensure_ascii=False, indent=4))
 
-                with open("data/prompt_in_memory.txt", "w", encoding="utf-8") as f:
-                    f.write(final_system_prompt)
+                    async with aiofiles.open("data/prompt_in_memory.txt", "w", encoding="utf-8") as f:
+                        await f.write(final_system_prompt)
+                except Exception as e:
+                    logger.warning(f"Failed to write debug logs: {e}")
 
                 # 调用 LLM
                 response_msg = await self._call_llm()
@@ -353,7 +514,6 @@ class AutonomousAgent:
                         # 构造思考日志
                         emotion = monologue.get("emotion_check", "Neutral")
                         plan = monologue.get("planning", "No plan")
-                        thought_display = f"[{emotion}] {plan}"
 
                         # 更新 Scratchpad
                         new_scratchpad = parsed_data.get("scratchpad", None)
@@ -364,7 +524,7 @@ class AutonomousAgent:
                         # 广播思考过程 (EventBus)
                         self.event_bus.publish_action(Action(
                             action="broadcast_log",
-                            params={"content": f"🧠 心流: {thought_display}"}
+                            params={"content": f"🧠 心流: [{emotion}] {plan}"}
                         ))
 
                         # 提取 Schema Tool Calls

@@ -17,7 +17,7 @@ def setup_logger(config: Config):
     log_level = getattr(logging, level_str, logging.INFO)
 
     # 2. 准备日志目录
-    log_dir = "data/logs"
+    log_dir = config.get("storage.log_dir", "data/logs")
     os.makedirs(log_dir, exist_ok=True)
     base_name = f"{log_dir}/Aethel_Trinity_{datetime.now().strftime('%Y-%m-%d')}"
 
@@ -60,5 +60,6 @@ def setup_logger(config: Config):
     logging.getLogger("chromadb").setLevel(logging.WARNING)
     logging.getLogger("aiosqlite").setLevel(logging.WARNING)
     logging.getLogger("apscheduler").setLevel(logging.WARNING)
+    logging.getLogger("watchdog").setLevel(logging.WARNING)
 
     logging.getLogger("core").info(f"日志系统已启动，级别: {level_str}")

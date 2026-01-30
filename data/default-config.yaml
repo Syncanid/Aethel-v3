@@ -6,6 +6,11 @@ system:
   onebot_token: ""
   bot_self_id: 12345678
 
+storage:
+  db_path: "data/storage.db"
+  vector_path: "data/vector_store"
+  log_dir: "data/logs"
+
 llm:
   # 兼容 OpenAI 格式的 API 设置
   api_base_url: "https://api.openai.com/v1"

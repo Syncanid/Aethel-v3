@@ -6,7 +6,7 @@ from typing import Optional
 
 from core.infrastructure.api_client import GenericAPIClient
 from core.infrastructure.config_loader import Config
-from core.io.event_schema import OneBotEvent, EventType, DetailType
+from core.io.event_schema import OneBotEvent, EventType
 from core.kernel.prompt import PromptManager
 
 logger = logging.getLogger(__name__)
@@ -58,9 +58,9 @@ class AttentionFilter:
     def _check_hard_rules(self, event: OneBotEvent) -> Optional[ReactionType]:
         """基于规则的快速匹配"""
 
-        # 规则 1: 私聊消息 -> 必须回复
-        if event.detail_type == DetailType.PRIVATE:
-            return ReactionType.REPLY
+        # # 规则 1: 私聊消息 -> 必须回复
+        # if event.detail_type == DetailType.PRIVATE:
+        #     return ReactionType.REPLY
 
         # 规则 2: 群聊中被 @ -> 必须回复
         # OneBot v11 的 CQ 码格式: [CQ:at,qq=123456]
