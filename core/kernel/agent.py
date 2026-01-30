@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import time
 import traceback
 from typing import List, Dict, Any, Optional, Awaitable, Callable
 
@@ -27,6 +28,7 @@ from core.utilities import calculate_tokens
 
 logger = logging.getLogger(__name__)
 
+AGENT_STATE_KEY = "AGENT_CORE_SNAPSHOT"
 
 class AutonomousAgent:
     def __init__(self, config: Config, event_bus: EventBus, database: Database):
@@ -42,14 +44,16 @@ class AutonomousAgent:
             "current_goal": "",
             "subtasks": [],
             "variables": {},
-            "progress_summary": ""
+            "progress_summary": "",
+            "current_interactor": None,
+            "last_context": None
         }
         self.last_response_content = ""  # 用于死锁检测
         self.last_observation_text = None
         self.consecutive_idle_count = 0  # 空转计数器
 
-        # --- 初始化注意力门控系统 ---
-        self.attention = AttentionFilter(config, self.prompt_manager, self.api_client)
+        # 初始化注意力门控系统
+        self.attention = AttentionFilter(config, self.prompt_manager, self.api_client, database)
 
         # --- 强制休眠标记 ---
         self.force_sleep = False
@@ -314,6 +318,57 @@ class AutonomousAgent:
 
         return current_estimated_tokens
 
+    # 核心状态持久化方法
+    async def _save_snapshot(self):
+        """
+        固化 Agent 核心状态到数据库
+        应在思考步骤结束后或关键状态变更时调用
+        """
+        try:
+            snapshot = {
+                "scratchpad": self.scratchpad,
+                "consecutive_idle_count": self.consecutive_idle_count,
+                "is_sleeping": self.is_sleeping,
+                "force_sleep": self.force_sleep,
+                "timestamp": time.time()
+            }
+            json_str = json.dumps(snapshot, ensure_ascii=False)
+
+            async with self.database.get_connection() as conn:
+                await conn.execute(
+                    "INSERT OR REPLACE INTO neuro_states (user_id, data_json, last_update) VALUES (?, ?, ?)",
+                    (AGENT_STATE_KEY, json_str, time.time())
+                )
+                await conn.commit()
+            logger.debug("核心状态快照已保存")
+        except Exception as e:
+            logger.error(f"状态快照保存失败: {e}")
+
+    # 核心状态恢复方法
+    async def _load_snapshot(self):
+        """
+        从数据库恢复 Agent 状态
+        """
+        try:
+            async with self.database.get_connection() as conn:
+                cursor = await conn.execute(
+                    "SELECT data_json FROM neuro_states WHERE user_id=?",
+                    (AGENT_STATE_KEY,)
+                )
+                row = await cursor.fetchone()
+                if row:
+                    snapshot = json.loads(row[0])
+                    # 恢复状态
+                    self.scratchpad.update(snapshot.get("scratchpad", {}))
+                    self.consecutive_idle_count = snapshot.get("consecutive_idle_count", 0)
+                    self.is_sleeping = snapshot.get("is_sleeping", False)
+                    self.force_sleep = snapshot.get("force_sleep", False)
+
+                    logger.info(f"🔄 成功恢复 Agent 核心状态 (上次保存: {time.ctime(snapshot.get('timestamp', 0))})")
+                    logger.info(f"   当前目标: {self.scratchpad.get('current_goal')}")
+        except Exception as e:
+            logger.error(f"状态恢复失败: {e}")
+
     async def run_autonomous_loop(self):
         """
         [Core Loop] 无限自主循环
@@ -338,13 +393,14 @@ class AutonomousAgent:
         system_prompt = self.prompt_manager.get_system_prompt()
         self.history.append({"role": "system", "content": system_prompt})
 
-        # 2. 启动海马体后台任务
-        asyncio.create_task(self.hippocampus.start())
+        # 2. 尝试恢复核心状态
+        await self._load_snapshot()
 
-        # 3. 启动边缘系统后台任务
+        # 3. 启动后台任务
+        asyncio.create_task(self.hippocampus.start())
         asyncio.create_task(self.limbic.start())
 
-        # 3. 注入启动信号
+        # 4. 注入启动信号
         self.history.append({
             "role": "user",
             "content": f"系统启动完成。"
@@ -393,6 +449,8 @@ class AutonomousAgent:
                 # 2. 如果 event 为空，但之前可能有任务在进行 -> 继续
                 if event and not self._should_think_after_event:
                     continue
+
+                await self._save_snapshot()
 
                 # --- B. 思考与决策阶段 (Thought) ---
 

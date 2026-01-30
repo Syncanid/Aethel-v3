@@ -24,6 +24,7 @@ class VectorStore:
 
     def _format_relative_time(self, timestamp: float) -> str:
         """计算相对时间描述 (中文)"""
+        if not timestamp: return "未知时间"
         diff = time.time() - timestamp
         if diff < 60:
             return "刚刚"
@@ -77,7 +78,7 @@ class VectorStore:
 
     async def save_vector_memory(self, memory: Union[EpisodicMemory, SemanticMemory], user_id: str):
         """
-        保存向量记忆 (带去重、压缩检测)
+        保存向量记忆 (双写机制: Chroma + SQLite)
         """
         try:
             # 1. 生成向量
@@ -116,8 +117,11 @@ class VectorStore:
                         duplicate_id = existing_id
                         logger.info(f"检测到重复记忆 (相似度 {similarity:.2f})，触发合并策略。")
 
+            target_id = None
+
             # 3. 分支处理
             if is_duplicate:
+                target_id = duplicate_id
                 # 策略 A: 语义记忆 -> 合并关键词，更新时间
                 if isinstance(memory, SemanticMemory):
                     # 获取旧的 metadata
@@ -145,6 +149,10 @@ class VectorStore:
                             documents=[final_content],
                             metadatas=[old_meta]
                         )
+                        # [同步更新 SQLite]
+                        async with self.db.get_connection() as conn:
+                            await conn.execute("UPDATE text_search_index SET content=? WHERE doc_id=?", (final_content, target_id))
+                            await conn.commit()
                         logger.info(f"语义记忆已更新 (内容增强): {final_content[:20]}...")
                     else:
                         # 仅更新 metadata
@@ -162,6 +170,7 @@ class VectorStore:
 
             else:
                 # 4. 无重复 -> 正常写入
+                target_id = str(uuid.uuid4())
                 metadata = memory.to_metadata()
                 metadata["user_id"] = user_id
 
@@ -169,12 +178,110 @@ class VectorStore:
                     embeddings=[embedding],
                     documents=[memory.content],
                     metadatas=[metadata],
-                    ids=[str(uuid.uuid4())]
+                    ids=[target_id]
                 )
+
+                # [同步写入 SQLite]
+                mem_type = "semantic" if isinstance(memory, SemanticMemory) else "episodic"
+                async with self.db.get_connection() as conn:
+                    await conn.execute(
+                        "INSERT INTO text_search_index (doc_id, content, puid, type) VALUES (?, ?, ?, ?)",
+                        (target_id, memory.content, user_id, mem_type)
+                    )
+                    await conn.commit()
+
                 logger.debug(f"向量记忆已保存: {memory.content}")
 
         except Exception as e:
             logger.error(f"向量存储失败: {e}", exc_info=True)
+
+    def _rrf_merge(self, list_a: List[Dict], list_b: List[Dict], k: int = 60) -> List[Dict]:
+        """
+        Reciprocal Rank Fusion (RRF) 算法
+        将两路检索结果合并，分数公式: score = 1 / (k + rank)
+        """
+        scores = {}
+        content_map = {}
+
+        # 处理列表 A (向量结果 - 优先，因为它带有 Metadata)
+        for rank, item in enumerate(list_a):
+            doc_id = item['id']
+            scores[doc_id] = scores.get(doc_id, 0) + 1.0 / (k + rank)
+            content_map[doc_id] = item
+
+        # 处理列表 B (文本结果)
+        for rank, item in enumerate(list_b):
+            doc_id = item['id']
+            scores[doc_id] = scores.get(doc_id, 0) + 1.0 / (k + rank)
+            # 只有当该 ID 不在 map 中时才添加 (优先保留向量检索返回的完整对象)
+            if doc_id not in content_map:
+                content_map[doc_id] = item
+
+        # 按分数降序排列
+        sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
+        return [content_map[doc_id] for doc_id in sorted_ids]
+
+    async def search_memory(self, query: str, user_id: str, limit: int = 5) -> List[str]:
+        """
+        混合检索 (Hybrid Search): 向量检索 + 关键词检索(SQL LIKE) -> RRF 融合
+        """
+
+        # 1. 向量检索 (Vector Search) - 擅长语意模糊匹配
+        vector_results = []
+        query_vec = await self.api_client.create_embedding(query)
+        if query_vec:
+            for coll in [self.episodic_coll, self.semantic_coll]:
+                res = coll.query(query_embeddings=[query_vec], n_results=limit * 2, where={"user_id": user_id})
+                if res['ids']:
+                    for i, doc_id in enumerate(res['ids'][0]):
+                        vector_results.append({
+                            "id": doc_id,
+                            "content": res['documents'][0][i],
+                            "metadata": res['metadatas'][0][i],
+                            "type": "vector"
+                        })
+
+        # 2. 文本检索 (Text Search) - 擅长精确匹配 (ID, 错误码, 专有名词)
+        text_results = []
+        async with self.db.get_connection() as conn:
+            # 使用 LIKE 进行包含匹配
+            sql = "SELECT doc_id, content, type FROM text_search_index WHERE puid=? AND content LIKE ? LIMIT ?"
+            cursor = await conn.execute(sql, (user_id, f"%{query}%", limit * 2))
+            rows = await cursor.fetchall()
+            for r in rows:
+                text_results.append({
+                    "id": r[0],
+                    "content": r[1],
+                    "metadata": {}, # 文本检索可能丢失 metadata，RRF 阶段会尝试互补
+                    "type": "text"
+                })
+
+        # 3. 结果融合 (Fusion)
+        merged_results = self._rrf_merge(vector_results, text_results)
+
+        # 4. 格式化输出
+        final_output = []
+
+        # 优先添加 Core Memory (置顶)
+        core_mems = await self.db.get_core_memory(user_id)
+        for k, v in core_mems.items():
+            if query in k or query in v:
+                final_output.append(f"[核心档案] {k}: {v}")
+
+        for item in merged_results[:limit]:
+            # 如果有 metadata 则使用高级格式化 (显示时间)
+            if item.get('metadata'):
+                formatted = self._format_memory_content(item['content'], item['metadata'])
+                tag = "情景" if "episodic" in str(item.get('metadata', '')) else "知识" # 简易判断
+                # 覆盖 tag
+                formatted = formatted.replace("] ", f" | {tag}] ", 1) # 插入类型标签
+            else:
+                # 纯文本回退格式
+                formatted = f"[精确匹配] {item['content']}"
+
+            final_output.append(formatted)
+
+        return final_output
 
     async def update_memory_status(self, content_query: str, user_id: str, new_status: str):
         """
@@ -212,6 +319,10 @@ class VectorStore:
             elif memory_type in ["episodic", "semantic"]:
                 collection = self.episodic_coll if memory_type == "episodic" else self.semantic_coll
                 collection.delete(ids=[memory_id], where={"user_id": user_id})
+                # [同步删除 SQLite]
+                async with self.db.get_connection() as conn:
+                    await conn.execute("DELETE FROM text_search_index WHERE doc_id=?", (memory_id,))
+                    await conn.commit()
             return True
         except Exception as e:
             logger.error(f"删除记忆失败: {e}")
@@ -233,6 +344,10 @@ class VectorStore:
                         embeddings=[new_embedding],
                         documents=[new_content]
                     )
+                    # [同步更新 SQLite]
+                    async with self.db.get_connection() as conn:
+                        await conn.execute("UPDATE text_search_index SET content=? WHERE doc_id=?", (new_content, memory_id))
+                        await conn.commit()
             return True
         except Exception as e:
             logger.error(f"更新记忆失败: {e}")
@@ -269,33 +384,4 @@ class VectorStore:
                     "status": meta.get("status", "active"),
                     "type": memory_type
                 })
-        return results
-
-    async def search_memory(self, query: str, user_id: str, limit: int = 5) -> List[str]:
-        """混合检索记忆 (Core + Vector)"""
-        results = []
-
-        # 核心记忆 (Key 匹配)
-        core_mems = await self.db.get_core_memory(user_id)  # 需在 Database 类补充此方法
-        for k, v in core_mems.items():
-            if query in k or query in v:
-                results.append(f"[核心档案] {k}: {v}")
-
-        # 2. 向量检索
-        query_vec = await self.api_client.create_embedding(query)
-        if query_vec:
-            # 搜索情景 (History)
-            epi = self.episodic_coll.query(query_embeddings=[query_vec], n_results=3, where={"user_id": user_id})
-            if epi['documents']:
-                for i, doc in enumerate(epi['documents'][0]):
-                    formatted = self._format_memory_content(doc, epi['metadatas'][0][i])
-                    results.append(f"[情景] {formatted}")
-
-            # 搜索语义 (Facts)
-            sem = self.semantic_coll.query(query_embeddings=[query_vec], n_results=3, where={"user_id": user_id})
-            if sem['documents']:
-                for i, doc in enumerate(sem['documents'][0]):
-                    formatted = self._format_memory_content(doc, sem['metadatas'][0][i])
-                    results.append(f"[知识] {formatted}")
-
         return results

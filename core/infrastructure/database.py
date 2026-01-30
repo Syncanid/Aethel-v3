@@ -1,3 +1,4 @@
+# core/infrastructure/database.py
 import logging
 import os
 from typing import Dict
@@ -64,7 +65,52 @@ SCHEMA_SQL = {
                         last_seen
                         REAL
                     )
-                    """
+                    """,
+    "wal_buffer": """
+                  CREATE TABLE IF NOT EXISTS wal_buffer
+                  (
+                      event_id
+                      TEXT
+                      PRIMARY
+                      KEY,
+                      content
+                      TEXT,
+                      role
+                      TEXT,
+                      metadata_json
+                      TEXT,
+                      created_at
+                      REAL
+                  )
+                  """,
+    "text_search_index": """
+                         CREATE TABLE IF NOT EXISTS text_search_index
+                         (
+                             doc_id
+                             TEXT
+                             PRIMARY
+                             KEY,
+                             content
+                             TEXT,
+                             puid
+                             TEXT,
+                             type
+                             TEXT
+                         )
+                         """,
+    "preference_store": """
+                        CREATE TABLE IF NOT EXISTS preference_store
+                        (
+                            key
+                            TEXT
+                            PRIMARY
+                            KEY,
+                            value
+                            TEXT,
+                            updated_at
+                            REAL
+                        )
+                        """
 }
 
 
@@ -96,8 +142,6 @@ class Database:
                     logger.error(f"初始化表 {table} 失败: {e}")
             await db.commit()
         logger.info(f"数据库已就绪: {self.db_path}")
-
-    # --- 以下是基础操作方法，后续根据需求添加具体查询逻辑 ---
 
     def get_connection(self):
         """获取 SQLite 连接上下文管理器"""

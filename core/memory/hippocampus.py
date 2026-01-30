@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import time
 from typing import List, Dict, Set
 
 from core.evolution.mimicry import SocialMimicry
@@ -40,8 +41,30 @@ class Hippocampus:
         self.is_running = True
         logger.info("海马体已启动...")
 
-        # 初始标记：启动时已存在的消息不重复处理（可选，根据需求决定是否追溯）
-        # 这里选择标记当前所有为已处理，只关注新增的，避免启动时重复归档旧梦
+        # 崩溃恢复：从 WAL 加载未处理的消息
+        try:
+            async with self.database.get_connection() as conn:
+                # 检查 wal_buffer 是否有遗留数据
+                cursor = await conn.execute(
+                    "SELECT event_id, content, role, metadata_json FROM wal_buffer ORDER BY created_at ASC"
+                )
+                rows = await cursor.fetchall()
+                if rows:
+                    logger.warning(f"⚡ 检测到非正常关闭，正在恢复 {len(rows)} 条未归档记忆...")
+                    for row in rows:
+                        event_id, content, role, meta_json = row
+                        recovered_msg = {
+                            "role": role,
+                            "content": content,
+                            "metadata": json.loads(meta_json)
+                        }
+                        # 注入特定的标记，避免 ID 冲突逻辑
+                        recovered_msg["metadata"]["_wal_id"] = event_id
+                        await self.slow_lane_queue.put(recovered_msg)
+        except Exception as e:
+            logger.error(f"WAL 恢复失败: {e}")
+
+        # 标记当前历史为已处理
         for msg in self.history_ref:
             self.processed_ids.add(id(msg))
 
@@ -60,6 +83,25 @@ class Hippocampus:
             try:
                 new_msgs = self._scan_delta()
                 for msg in new_msgs:
+                    # 生成唯一 ID
+                    wal_id = str(id(msg))
+                    msg["metadata"]["_wal_id"] = wal_id # 注入 ID 以便后续删除
+
+                    # WAL 落盘
+                    # 必须在放入内存队列前完成，保证可靠性
+                    async with self.database.get_connection() as conn:
+                        await conn.execute(
+                            "INSERT OR IGNORE INTO wal_buffer (event_id, content, role, metadata_json, created_at) VALUES (?, ?, ?, ?, ?)",
+                            (
+                                wal_id,
+                                msg.get("content", ""),
+                                msg.get("role", "unknown"),
+                                json.dumps(msg.get("metadata", {})),
+                                time.time()
+                            )
+                        )
+                        await conn.commit()
+
                     await self.slow_lane_queue.put(msg)
             except Exception as e:
                 logger.error(f"Ingest loop error: {e}")
@@ -92,11 +134,23 @@ class Hippocampus:
                     # 触发深层处理
                     logger.info(f"💤 进入梦境处理 (Items: {len(buffer)})")
 
-                    # 任务 A: 记忆归档
-                    await self._consolidate_memory(list(buffer))
+                    # 复制 buffer 避免处理中途被修改
+                    processing_batch = list(buffer)
 
-                    # 任务 B: 社会化进化 (Mimicry)
-                    await self.mimicry.evolve(list(buffer))
+                    # 任务 A: 记忆归档
+                    await self._consolidate_memory(processing_batch)
+
+                    # 任务 B: 社会化进化
+                    await self.mimicry.evolve(processing_batch)
+
+                    # 事务完成：清理 WAL
+                    # 只有当 LLM 处理完成后才删除，确保“至少一次”语义
+                    wal_ids = [m["metadata"].get("_wal_id") for m in processing_batch if "_wal_id" in m["metadata"]]
+                    if wal_ids:
+                        async with self.database.get_connection() as conn:
+                            placeholders = ",".join("?" * len(wal_ids))
+                            await conn.execute(f"DELETE FROM wal_buffer WHERE event_id IN ({placeholders})", wal_ids)
+                            await conn.commit()
 
                     buffer.clear()
                     last_dream_time = current_time
