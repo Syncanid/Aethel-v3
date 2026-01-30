@@ -53,7 +53,12 @@ class AutonomousAgent:
         self.consecutive_idle_count = 0  # 空转计数器
 
         # 初始化注意力门控系统
-        self.attention = AttentionFilter(config, self.prompt_manager, self.api_client, database)
+        self.attention = AttentionFilter(
+            config=config,
+            prompt=self.prompt_manager,
+            api_client=self.api_client,
+            database=database
+        )
 
         # --- 强制休眠标记 ---
         self.force_sleep = False
@@ -390,7 +395,17 @@ class AutonomousAgent:
         await self.limbic.initialize()
 
         # 1. 注入初始系统上下文
-        system_prompt = self.prompt_manager.get_system_prompt()
+        # 获取当前兴趣
+        initial_interest = await self.attention.get_current_interest_text()
+
+        # 获取初始生理状态
+        initial_state = await self.limbic.get_state()
+
+        # 生成完整 Prompt
+        system_prompt = self.prompt_manager.get_system_prompt(
+            neuro_state=initial_state,
+            interest_context=initial_interest
+        )
         self.history.append({"role": "system", "content": system_prompt})
 
         # 2. 尝试恢复核心状态
@@ -465,12 +480,14 @@ class AutonomousAgent:
                 # 1. 获取当前神经状态
                 current_neuro_state = await self.limbic.get_state()
                 current_interactor = self.scratchpad.get("current_interactor")
+                current_interest = await self.attention.get_current_interest_text()
 
                 # 2. 生成带有状态描述的 Prompt
                 system_prompt_base = self.prompt_manager.get_system_prompt(
                     neuro_state=current_neuro_state,
                     memory_context=retrieved_memories,
-                    social_context=current_interactor
+                    social_context=current_interactor,
+                    interest_context=initial_interest
                 )
 
                 # 3. 附加 Scratchpad

@@ -223,8 +223,7 @@ prime_directives:
 
     def _get_social_instruction(self, interactor: Optional[Dict[str, Any]]) -> str:
         """
-        [NEW] 基于社交关系生成动态指令 (Social Driven Prompt)
-        修复问题 #4: 利用 intimacy 和 trust 维度
+        基于社交关系生成动态指令
         """
         if not interactor or interactor.get("status") == "STRANGER":
             return ""
@@ -300,7 +299,7 @@ prime_directives:
 
         mem_str = "\n".join(memories)
         return f"""
-## 相关记忆回溯 (Active Recall)
+## 相关记忆回溯
 系统根据当前上下文关联到了以下历史记忆，请利用这些信息保持对话的连贯性和个性化：
 {mem_str}
 """
@@ -323,7 +322,7 @@ prime_directives:
                 return ""
 
             return f"""
-## 社会化伪装 (Social Camouflage)
+## 社会化伪装
 为了更好地融入当前群体，请在非严肃场景下尝试模仿以下风格：
 - 近期流行词: {phrases}
 - 表情使用习惯: {emojis}
@@ -332,16 +331,27 @@ prime_directives:
         except Exception:
             return ""
 
+    def _get_interest_context(self, interest: str) -> str:
+        """[新增] 生成当前关注点上下文"""
+        if not interest:
+            return ""
+        return f"""
+## 当前显意识关注
+- 核心关注点: {interest}
+- 注意力策略: 系统应优先处理与上述话题相关的信息。对于无关话题，可适当降低处理深度或通过“无聊机制”进行过滤。
+"""
+
     def get_system_prompt(self,
                           neuro_state: Optional[NeuroState] = None,
                           memory_context: List[str] = None,
-                          social_context: Optional[Dict] = None) -> str:
+                          social_context: Optional[Dict] = None,
+                          interest_context: str = "") -> str:
         """获取 System Prompt"""
         try:
-            with open(self.prompt_path, "r", encoding="utf-8-sig") as f:
+            with open(self.prompt_path, "r", encoding="utf-8") as f:
                 content = f.read()
         except UnicodeDecodeError:
-            with open(self.prompt_path, "r", encoding="utf-8") as f:
+            with open(self.prompt_path, "r", encoding="gbk") as f:
                 content = f.read()
 
         content = content.replace("\r\n", "\n").replace("\r", "\n").strip()
@@ -352,6 +362,7 @@ prime_directives:
         time_block = self._get_time_context()
         neuro_block = self._get_neuro_context(neuro_state)
         social_block = self._get_social_instruction(social_context)
+        interest_block = self._get_interest_context(interest_context)
         memory_block = self._get_memory_context(memory_context)
         mimicry_block = self._get_social_mimicry_context()
 
@@ -367,6 +378,7 @@ prime_directives:
             system_block,
             time_block,
             neuro_block,
+            interest_block,
             social_block,
             mimicry_block,
             memory_block

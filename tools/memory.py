@@ -4,6 +4,7 @@ from core.infrastructure.config_loader import get_config
 from core.infrastructure.database import Database
 from core.io.event_bus import EventBus
 from core.io.event_schema import Action
+from core.kernel.agent import AutonomousAgent
 from core.memory.schema import SemanticMemory
 from core.memory.vector_store import VectorStore
 from core.tool_manager.registry import register
@@ -111,3 +112,40 @@ async def recall_memory(
         params={"content": f"🔍 检索结果:\n{found}"}
     ))
     return f"找到以下记忆:\n{found}"
+
+
+@register()
+async def update_interest(
+        new_interest: str,
+        reason: str,
+        agent: AutonomousAgent
+) -> str:
+    """
+    [Self-Regulation] 修改自身的关注点（兴趣向量）。
+    当你发现当前的关注点（如“编程”）不再适用，或者你想探索新话题时，使用此工具。
+    这会直接影响你的注意力门控系统，使你对符合新兴趣的消息更敏感。
+
+    Args:
+        new_interest: 新的兴趣描述（自然语言）。
+        reason: 修改兴趣的原因。
+    """
+    if not new_interest or not new_interest.strip():
+        return "错误: new_interest 不能为空。"
+
+    try:
+        # 检查 Agent 是否具备 Attention 模块
+        if not hasattr(agent, "attention") or not hasattr(agent.attention, "update_interest"):
+            return "错误: 当前 Agent 内核不支持动态兴趣更新 (AttentionFilter 未初始化)。"
+
+        # 调用 Agent 的 Attention Filter 进行更新
+        # 这会触发 Embedding API 调用并更新数据库中的 preference_store
+        await agent.attention.update_interest(new_interest)
+
+        # 记录日志
+        logger.info(f"🔄 [Self-Regulation] 兴趣已更新: {new_interest} (Reason: {reason})")
+
+        return f"成功: 你的关注点已更新为 '{new_interest}'。现在的你会对相关话题更感兴趣。"
+
+    except Exception as e:
+        logger.error(f"更新兴趣失败: {e}", exc_info=True)
+        return f"系统错误: 更新兴趣失败 - {str(e)}"
