@@ -38,7 +38,7 @@ class AttentionFilter:
         # 1. 基础过滤：非消息事件通常由 Adapter 处理或转化为文本
         # 注意：内部驱动 (Internal Drive) 属于系统自发需求，必须响应
         if event.type != EventType.MESSAGE:
-            if event.detail_type == DetailType.INTERNAL_DRIVE:
+            if event.detail_type in ["internal_drive"]:
                 return ReactionType.REPLY
             # 系统心跳、连接通知等 Meta 事件，默认静默
             return ReactionType.OBSERVE
@@ -119,6 +119,7 @@ class AttentionFilter:
             # 使用 create_chat_completion 的 schema 模式强制结构化输出
             response = await self.api_client.create_chat_completion(
                 messages=[{"role": "system", "content": prompt}],
+                model=self.api_client.small_model,
                 schema={
                     "type": "object",
                     "properties": {

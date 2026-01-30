@@ -54,6 +54,7 @@ class AppraisalSystem:
             # 使用较快的模型或默认模型
             resp = await self.api_client.create_chat_completion(
                 messages=[{"role": "system", "content": prompt}],
+                model=self.api_client.small_model,
                 schema={
                     "type": "object",
                     "properties": {

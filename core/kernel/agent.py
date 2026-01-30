@@ -200,6 +200,8 @@ class AutonomousAgent:
                 should_act = True  # 默认行动
 
                 if event:
+                    if event.type in [EventType.META]:
+                        continue
                     # 1. 处理事件 (存入记忆/边缘系统感知)
                     await self._process_incoming_event(event)
                     # 如果收到新事件，重置空转计数器

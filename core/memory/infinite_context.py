@@ -141,6 +141,7 @@ class InfiniteContextManager:
 
         # 使用 create_chat_completion，不带 tools，纯文本生成
         response = await self.api_client.create_chat_completion(
+            model=self.api_client.small_model,
             messages=messages,
         )
 

@@ -16,6 +16,7 @@ class GenericAPIClient:
         self.base_url = config.get("llm.api_base_url")
         self.api_key = config.get("llm.api_key")
         self.model = config.get("llm.model_name")
+        self.small_model = config.get("llm.small_model", self.model)
         self.embedding_model = config.get("llm.embedding_model_name")
 
         self.session: Optional[aiohttp.ClientSession] = None

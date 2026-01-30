@@ -12,6 +12,7 @@ llm:
   api_key: "sk-YourKeyHere"
 
   model_name: "gpt-4o"
+  small_model: "gpt-4o-mini"
   model_context: 32767
   # 工具调用策略配置
   # true: 在返回的 JSON content 中检测 tool_calls 字段

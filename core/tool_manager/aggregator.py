@@ -133,8 +133,19 @@ class ToolManager:
             error_msg = str(e)
             logger.error(f"工具 {name} 执行异常: {error_msg}")
 
+            # 判断是否值得自愈
+            # 仅当错误看起来像参数错误时才重试
+            should_heal = False
+            keywords = ["argument", "missing", "type", "value", "json", "format", "invalid"]
+            if any(k in error_msg.lower() for k in keywords):
+                should_heal = True
+
+            # 排除明显的环境错误
+            if "timeout" in error_msg.lower() or "connection" in error_msg.lower() or "404" in error_msg:
+                should_heal = False
+
             # 触发自愈回路
-            if allow_self_heal and self.max_self_heal_attempts > 0:
+            if allow_self_heal and self.max_self_heal_attempts > 0 and should_heal:
                 logger.info(f"🩹 触发自愈回路: {name}")
 
                 # 1. 尝试自愈
@@ -253,6 +264,7 @@ class ToolManager:
             # 使用 API Client 调用 (强制 JSON 模式)
             response = await self.api_client.create_chat_completion(
                 messages=[{"role": "user", "content": prompt}],
+                model=self.api_client.small_model,
                 schema={
                     "type": "object",
                     "description": "Fixed arguments for the tool",
