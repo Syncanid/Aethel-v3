@@ -233,8 +233,14 @@ class AutonomousAgent:
         """
         [中间件] 注意力门控
         """
+        # 提取最近的对话历史 (用于辅助 Attention 判断)
+        # 注意：因为 _mw_transcribe_and_log 已经运行过，此时 self.history 的最后一条就是当前正在处理的 event。
+        # 我们需要把它排除，只取之前的历史作为 "Context"。
+        # 取最近 5 条即可。
+        recent_history = self.history[:-1][-5:] if len(self.history) > 1 else []
+
         # 1. 评估
-        reaction = await self.attention.evaluate(event)
+        reaction = await self.attention.evaluate(event, recent_history=recent_history)
         self._current_reaction = reaction
 
         # 2. 决策
@@ -487,7 +493,7 @@ class AutonomousAgent:
                     neuro_state=current_neuro_state,
                     memory_context=retrieved_memories,
                     social_context=current_interactor,
-                    interest_context=initial_interest
+                    interest_context=current_interest
                 )
 
                 # 3. 附加 Scratchpad

@@ -4,7 +4,7 @@ import logging
 import math
 import time
 from enum import Enum
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict
 
 from core.infrastructure.api_client import GenericAPIClient
 from core.infrastructure.config_loader import Config
@@ -53,7 +53,7 @@ class AttentionFilter:
         # 惯性持续时间 (秒)
         self.INERTIA_WINDOW = 120
 
-    async def evaluate(self, event: OneBotEvent) -> ReactionType:
+    async def evaluate(self, event: OneBotEvent, recent_history: Optional[List[Dict]] = None) -> ReactionType:
         """
         [主入口] 评估事件重要性
         流程: 硬规则 -> 语义门控(Pre-Filter) -> LLM软规则(Soft-Rule)
@@ -84,45 +84,13 @@ class AttentionFilter:
 
         # 4. 软规则
         # 只有过了门控的精英消息，才有资格让大脑(LLM)思考
-        soft_reaction = await self._check_soft_rules(event, dynamic_threshold, state_desc)
+        soft_reaction = await self._check_soft_rules(event, dynamic_threshold, state_desc, recent_history)
 
         # 如果 LLM 决定回复，更新活跃时间
         if soft_reaction in [ReactionType.REPLY, ReactionType.INTERJECT]:
             self.last_reply_time = time.time()
 
         return soft_reaction
-
-    # --- 核心组件 1：语义门控 ---
-
-    async def _semantic_gate_check(self, event: OneBotEvent, threshold: float, state_desc: str) -> Tuple[bool, str]:
-        """
-        计算 (消息向量 vs 兴趣向量) 的相似度，并与 (生理驱动动态阈值) 比较。
-        """
-        message_text = event.alt_message
-        if not message_text or len(message_text) < 2:
-            return False, "消息太短"
-
-        # 1. 获取当前兴趣向量
-        interest_vec = await self._get_current_interest_vector()
-        if not interest_vec:
-            # 如果没有兴趣向量（初始化失败），默认放行，依靠 LLM
-            return True, "无兴趣向量，默认放行"
-
-        # 2. 计算消息向量 (调用 Embedding API)
-        msg_vec = await self.api_client.create_embedding(message_text)
-        if not msg_vec:
-            return False, "Embedding 生成失败"
-
-        # 3. 计算相似度
-        similarity = self._cosine_similarity(interest_vec, msg_vec)
-
-        # 4. 判定
-        passed = similarity >= threshold
-
-        log_msg = (f"Sim={similarity:.2f} | Thr={threshold:.2f} "
-                   f"({state_desc}) | Interest='{self._cached_interest_text}'")
-
-        return passed, log_msg
 
     async def _calculate_dynamic_threshold(self) -> Tuple[float, str]:
         """
@@ -159,14 +127,57 @@ class AttentionFilter:
 
         return threshold, ",".join(factors)
 
-    # --- 核心组件 2：LLM 软规则 ---
+    # --- 核心组件 1：语义门控 ---
+    async def _semantic_gate_check(self, event: OneBotEvent, threshold: float, state_desc: str) -> Tuple[bool, str]:
+        """
+        计算 (消息向量 vs 兴趣向量) 的相似度，并与 (生理驱动动态阈值) 比较。
+        """
+        message_text = event.alt_message
+        if not message_text or len(message_text) < 2:
+            return False, "消息太短"
 
-    async def _check_soft_rules(self, event: OneBotEvent, threshold: float, state_desc: str) -> ReactionType:
+        # 1. 获取当前兴趣向量
+        interest_vec = await self._get_current_interest_vector()
+        if not interest_vec:
+            # 如果没有兴趣向量（初始化失败），默认放行，依靠 LLM
+            return True, "无兴趣向量，默认放行"
+
+        # 2. 计算消息向量 (调用 Embedding API)
+        msg_vec = await self.api_client.create_embedding(message_text)
+        if not msg_vec:
+            return False, "Embedding 生成失败"
+
+        # 3. 计算相似度
+        similarity = self._cosine_similarity(interest_vec, msg_vec)
+
+        # 4. 判定
+        passed = similarity >= threshold
+
+        log_msg = (f"Sim={similarity:.2f} | Thr={threshold:.2f} "
+                   f"({state_desc}) | Interest='{self._cached_interest_text}'")
+
+        return passed, log_msg
+
+    # --- 核心组件 2：LLM 软规则 ---
+    async def _check_soft_rules(self, event: OneBotEvent, threshold: float, state_desc: str, recent_history: Optional[List[Dict]] = None) -> ReactionType:
         """
         LLM 决策层：只有通过了语义门控的消息才会到达这里。
         """
         content = event.alt_message
         sender = event.source.user_id
+
+        context_str = "无"
+        if recent_history:
+            lines = []
+            for msg in recent_history:
+                role = msg.get("role", "unknown")
+                text = str(msg.get("content", ""))
+                # 简单清洗与截断，防止 Token 爆炸
+                text = text.replace("\n", " ")
+                if len(text) > 60:
+                    text = text[:60] + "..."
+                lines.append(f"- {role}: {text}")
+            context_str = "\n".join(lines)
 
         # 将数学阈值转换为自然语言指导
         if threshold > 0.7:
@@ -183,6 +194,9 @@ class AttentionFilter:
 当前状态: {mode_desc} (生理阈值: {threshold:.2f}, 状态: {state_desc})。
 当前兴趣: "{self._cached_interest_text}"。
 
+【近期上下文】
+{context_str}
+
 【当前消息】
 发送者: {sender}
 内容: "{content}"
@@ -192,6 +206,7 @@ class AttentionFilter:
    - 用户在向你提问 (即使没 @ 你)。
    - 话题与你高度相关。
    - 检测到用户情绪激动，需要安抚。
+   - 上下文显示这是对你上一句回复的追问。
 
 2. INTERJECT (插话): 
    - 用户在聊其他话题，但你觉得非常有趣、有梗。
@@ -334,8 +349,8 @@ class AttentionFilter:
         if self.nickname and event.alt_message.strip().startswith(self.nickname):
             return ReactionType.REPLY
 
-        # 3. 私聊 (可选，视配置而定)
-        if event.detail_type == DetailType.PRIVATE:
-            return ReactionType.REPLY
+        # # 3. 私聊 (可选，视配置而定)
+        # if event.detail_type == DetailType.PRIVATE:
+        #     return ReactionType.REPLY
 
         return None
