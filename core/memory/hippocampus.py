@@ -85,7 +85,8 @@ class Hippocampus:
                 for msg in new_msgs:
                     # 生成唯一 ID
                     wal_id = str(id(msg))
-                    msg["metadata"]["_wal_id"] = wal_id # 注入 ID 以便后续删除
+                    msg.setdefault("metadata", {})
+                    msg["metadata"]["_wal_id"] = wal_id  # 注入 ID 以便后续删除
 
                     # WAL 落盘
                     # 必须在放入内存队列前完成，保证可靠性
@@ -104,7 +105,7 @@ class Hippocampus:
 
                     await self.slow_lane_queue.put(msg)
             except Exception as e:
-                logger.error(f"Ingest loop error: {e}")
+                logger.error(f"Ingest loop error: {e}", exc_info=True)
 
             await asyncio.sleep(2)  # 高频检查 (2s)
 

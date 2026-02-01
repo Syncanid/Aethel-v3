@@ -60,7 +60,7 @@ async def web_search(config: Config, query: str) -> str:
 
 
 @register()
-async def browse_website(url: str, config: Config) -> str:
+async def browse_website(url: str) -> str:
     """
     [Network] 访问指定 URL 并提取网页正文内容。
     用于深入阅读搜索结果中的网页。
@@ -101,8 +101,7 @@ async def send_http_request(
         method: str,
         url: str,
         headers: str = None,
-        data: str = None,
-        config: Config = None
+        data: str = None
 ) -> str:
     """
     [Network] 发送自定义 HTTP 请求 (GET, POST, PUT, DELETE)。

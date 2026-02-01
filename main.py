@@ -3,9 +3,9 @@ import asyncio
 import logging
 import sys
 import threading
+import argparse
 from typing import List, Optional
 
-from core.gui.dashboard import run_gui
 from core.gui.monitor_registry import monitor_registry
 # --- 基础设施层 ---
 from core.infrastructure.config_loader import Config
@@ -159,6 +159,10 @@ def start_backend_thread(loop, system):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Aethel-v3 AI Agent System")
+    parser.add_argument("--nogui", action="store_true", help="以无头模式启动 (不显示 GUI)")
+    args = parser.parse_args()
+
     # Windows 兼容性
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -166,28 +170,64 @@ if __name__ == "__main__":
     # 1. 创建 System 实例
     system = AethelSystem()
 
-    # 2. 创建新的事件循环
-    new_loop = asyncio.new_event_loop()
+    if args.nogui:
+        # === NoGUI 模式 ===
+        print(">>> 正在以无头模式 (NoGUI) 启动 <<<")
+        print(">>> 按 Ctrl+C 停止系统 <<<")
 
-    # 3. 在子线程启动后端
-    t = threading.Thread(target=start_backend_thread, args=(new_loop, system), daemon=True)
-    t.start()
+        # 直接在主线程创建循环
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
-    print(">>> 正在启动 GUI 监控终端 (关闭窗口以退出系统) <<<")
+        try:
+            # 引导并启动
+            loop.run_until_complete(system.bootstrap())
+            loop.run_until_complete(system.start())
+        except KeyboardInterrupt:
+            logger.info("接收到键盘中断信号 (Ctrl+C)，准备退出...")
+        except Exception as e:
+            logger.critical(f"系统运行异常: {e}", exc_info=True)
+        finally:
+            # 优雅退出
+            try:
+                loop.run_until_complete(system.shutdown())
+            except Exception as e:
+                logger.error(f"关闭过程中发生错误: {e}")
+            loop.close()
+            sys.exit(0)
 
-    # 4. 在主线程运行 GUI (阻塞直到窗口关闭)
-    try:
-        exit_code = run_gui()
-    except KeyboardInterrupt:
-        exit_code = 0
-    except Exception as e:
-        print(f"GUI Error: {e}")
-        exit_code = 1
+    else:
+        # === GUI 模式 (默认) ===
+        # 延迟导入，避免 NoGUI 模式下缺少 PyQt6 导致报错
+        try:
+            from core.gui.dashboard import run_gui
+        except ImportError as e:
+            print(f"错误: 无法导入 GUI 模块 ({e})。")
+            print("提示: 请安装 PyQt6 或使用 'python main.py --nogui' 启动无头模式。")
+            sys.exit(1)
 
-    # 5. 退出处理
-    print("正在停止后台服务...")
-    if new_loop.is_running():
-        asyncio.run_coroutine_threadsafe(system.shutdown(), new_loop)
+        # 2. 创建新的事件循环
+        new_loop = asyncio.new_event_loop()
 
-    t.join(timeout=3)
-    sys.exit(exit_code)
+        # 3. 在子线程启动后端
+        t = threading.Thread(target=start_backend_thread, args=(new_loop, system), daemon=True)
+        t.start()
+
+        print(">>> 正在启动 GUI 监控终端 (关闭窗口以退出系统) <<<")
+
+        # 4. 在主线程运行 GUI (阻塞直到窗口关闭)
+        try:
+            exit_code = run_gui()
+        except KeyboardInterrupt:
+            exit_code = 0
+        except Exception as e:
+            print(f"GUI Error: {e}")
+            exit_code = 1
+
+        # 5. 退出处理
+        print("正在停止后台服务...")
+        if new_loop.is_running():
+            asyncio.run_coroutine_threadsafe(system.shutdown(), new_loop)
+
+        t.join(timeout=3)
+        sys.exit(exit_code)

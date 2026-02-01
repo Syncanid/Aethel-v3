@@ -45,8 +45,8 @@ class AutonomousAgent:
             "subtasks": [],
             "variables": {},
             "progress_summary": "",
-            "current_interactor": None,
-            "last_context": None
+            "current_interactor": {},
+            "last_context": {}
         }
         self.last_response_content = ""  # 用于死锁检测
         self.last_observation_text = None
@@ -928,7 +928,7 @@ class AutonomousAgent:
 
     async def _call_llm(self) -> Dict[str, Any]:
         """封装 API 调用"""
-        schemas = self.tool_manager.get_tool_schemas()
+        tools = self.tool_manager.get_tool_schemas()
 
         use_schema_tools = self.config.get("llm.use_schema_tool_calls", True)
         arg_mode = self.config.get("llm.tool_call_arg_mode", "object")
@@ -1020,7 +1020,7 @@ class AutonomousAgent:
         # 调用 API，同时传入 tools 和 schema
         response = await self.api_client.create_chat_completion(
             messages=sanitized_history,
-            tools=schemas if schemas else None,
+            tools=tools if tools else None,
             schema=thought_structure,
             tool_choice="none" if use_schema_tools else "auto"
         )

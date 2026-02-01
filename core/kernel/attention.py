@@ -74,13 +74,14 @@ class AttentionFilter:
         # 这个阈值将贯穿 语义门控 和 LLM决策 两个阶段
         dynamic_threshold, state_desc = await self._calculate_dynamic_threshold()
 
-        # 3. 语义门控
-        # 这是一个低成本的向量检查，决定是否值得消耗 Token 进 LLM
-        gate_passed, gate_reason = await self._semantic_gate_check(event, dynamic_threshold, state_desc)
-
-        if not gate_passed:
-            # 门控未通过 -> 直接忽略
-            return ReactionType.IGNORE
+        # 语义门控不成熟
+        # # 3. 语义门控
+        # # 这是一个低成本的向量检查，决定是否值得消耗 Token 进 LLM
+        # gate_passed, gate_reason = await self._semantic_gate_check(event, dynamic_threshold, state_desc)
+        #
+        # if not gate_passed:
+        #     # 门控未通过 -> 直接忽略
+        #     return ReactionType.IGNORE
 
         # 4. 软规则
         # 只有过了门控的精英消息，才有资格让大脑(LLM)思考
