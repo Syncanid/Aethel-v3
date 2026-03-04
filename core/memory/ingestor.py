@@ -39,7 +39,7 @@ class KnowledgeIngestor:
                 async with aiofiles.open(file_path, 'r', encoding='gbk', errors='ignore') as f:
                     content = await f.read()
             except Exception as e:
-                logger.error(f"文件读取编码错误: {e}")
+                logger.error(f"文件读取编码错误: {e}", exc_info=True)
                 return 0
 
         if not content.strip():
@@ -154,7 +154,7 @@ class KnowledgeIngestor:
             data = json.loads(content_str)
             return data.get("knowledge_units", [])
         except (json.JSONDecodeError, KeyError) as e:
-            logger.error(f"LLM 返回的 JSON 格式错误: {e}")
+            logger.error(f"LLM 返回的 JSON 格式错误: {e}", exc_info=True)
             return []
 
     def _chunk_text_physically(self, text: str, max_chars: int) -> List[str]:

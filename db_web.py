@@ -1,15 +1,13 @@
-import json
+import logging
 import logging
 import os
-import sqlite3
-import sys
-from typing import List, Dict, Any, Optional
+from typing import Dict, Any
 
 import aiosqlite
 import uvicorn
-from fastapi import FastAPI, HTTPException, Body, Request
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 # 尝试导入 ChromaDB
@@ -469,7 +467,7 @@ async def api_init():
             colls = client.list_collections()
             collections = [c.name for c in colls]
         except Exception as e:
-            logger.error(f"Chroma init error: {e}")
+            logger.error(f"Chroma init error: {e}", exc_info=True)
 
     return {"has_chroma": HAS_CHROMA, "tables": tables, "collections": collections}
 
@@ -580,7 +578,7 @@ async def get_vectors(collection_name: str):
             })
         return data
     except Exception as e:
-        logger.error(f"Vector fetch error: {e}")
+        logger.error(f"Vector fetch error: {e}", exc_info=True)
         return []
 
 

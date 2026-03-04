@@ -24,7 +24,7 @@ class SocialMimicry:
                 with open(self.style_file, "w", encoding="utf-8") as f:
                     json.dump({"catchphrases": [], "emoji_style": [], "sentence_structure": []}, f)
             except Exception as e:
-                logger.error(f"Failed to init style file: {e}")
+                logger.error(f"Failed to init style file: {e}", exc_info=True)
 
     async def evolve(self, recent_logs: List[Dict]):
         """
@@ -87,7 +87,7 @@ class SocialMimicry:
                 logger.info(f"🧬 [Mimicry] 进化完成: 习得 {len(new_style.get('catchphrases', []))} 个新梗")
 
         except Exception as e:
-            logger.error(f"Mimicry evolution failed: {e}")
+            logger.error(f"Mimicry evolution failed: {e}", exc_info=True)
 
     def _save_style(self, data: Dict):
         """持久化风格配置"""
@@ -95,4 +95,4 @@ class SocialMimicry:
             with open(self.style_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception as e:
-            logger.error(f"Failed to save style config: {e}")
+            logger.error(f"Failed to save style config: {e}", exc_info=True)

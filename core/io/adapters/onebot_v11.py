@@ -201,8 +201,8 @@ class OneBotV11Adapter(BaseAdapter):
             msg = action.params.get("message")
 
             # 优先检查 Action 中是否显式指定了 target
-            target_group = action.params.get("group_id")
-            target_user = action.params.get("user_id")
+            target_group = str(action.params.get("group_id")) if action.params.get("group_id") else None
+            target_user = str(action.params.get("user_id")) if action.params.get("user_id") else None
 
             if target_group:
                 resp = await self.call_api("get_group_list")
@@ -211,7 +211,7 @@ class OneBotV11Adapter(BaseAdapter):
                 for group in data:
                     groups.append(str(group["group_id"]))
                 if target_group not in groups:
-                    return ActionResponse(status=ActionStatus.FAILED, message="未知的群聊，请查询群聊列表")
+                    return ActionResponse(status=ActionStatus.FAILED, message="未知的群聊，请检查群聊列表")
                 api_name = "send_group_msg"
                 params = {"group_id": target_group, "message": msg}
             elif target_user:
@@ -224,7 +224,8 @@ class OneBotV11Adapter(BaseAdapter):
                         continue
                     friends.append(str(friend["user_id"]))
                 if target_user not in friends:
-                    return ActionResponse(status=ActionStatus.FAILED, message="未知的用户，请查询好友列表或者添加好友")
+                    print(friends)
+                    return ActionResponse(status=ActionStatus.FAILED, message="未知的用户，请检查好友列表")
                 api_name = "send_private_msg"
                 params = {"user_id": target_user, "message": msg}
             else:
@@ -262,7 +263,7 @@ class OneBotV11Adapter(BaseAdapter):
                 )
 
         except Exception as e:
-            logger.error(f"Action {action.action} 执行异常: {e}")
+            logger.error(f"Action {action.action} 执行异常: {e}", exc_info=True)
             return ActionResponse(status=ActionStatus.FAILED, message=f"Adapter Exception: {str(e)}")
 
     async def call_api(self, action: str, params: Dict = None, timeout: float = 20.0) -> Any:
@@ -293,7 +294,7 @@ class OneBotV11Adapter(BaseAdapter):
             await self._pending_requests.pop(echo_id, None)
             return {"status": "failed", "retcode": -1, "msg": "Timeout"}
         except Exception as e:
-            logger.error(f"API 请求异常: {e}")
+            logger.error(f"API 请求异常: {e}", exc_info=True)
             await self._pending_requests.pop(echo_id, None)
             return {"status": "failed", "retcode": -1, "msg": str(e)}
 

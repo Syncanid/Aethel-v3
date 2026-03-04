@@ -260,5 +260,5 @@ async def groundbreaking_analysis(
             return {"error": "解析分析结果失败", "raw": content}
 
     except Exception as e:
-        logger.error(f"开创性分析失败: {e}")
+        logger.error(f"开创性分析失败: {e}", exc_info=True)
         return {"error": str(e)}

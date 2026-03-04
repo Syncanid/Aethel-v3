@@ -3,7 +3,6 @@ import asyncio
 import json
 import logging
 import time
-import traceback
 from typing import List, Dict, Any, Optional, Awaitable, Callable
 
 import aiofiles
@@ -29,6 +28,7 @@ from core.utilities import calculate_tokens
 logger = logging.getLogger(__name__)
 
 AGENT_STATE_KEY = "AGENT_CORE_SNAPSHOT"
+
 
 class AutonomousAgent:
     def __init__(self, config: Config, event_bus: EventBus, database: Database):
@@ -353,7 +353,7 @@ class AutonomousAgent:
                 await conn.commit()
             logger.debug("核心状态快照已保存")
         except Exception as e:
-            logger.error(f"状态快照保存失败: {e}")
+            logger.error(f"状态快照保存失败: {e}", exc_info=True)
 
     # 核心状态恢复方法
     async def _load_snapshot(self):
@@ -378,7 +378,7 @@ class AutonomousAgent:
                     logger.info(f"🔄 成功恢复 Agent 核心状态 (上次保存: {time.ctime(snapshot.get('timestamp', 0))})")
                     logger.info(f"   当前目标: {self.scratchpad.get('current_goal')}")
         except Exception as e:
-            logger.error(f"状态恢复失败: {e}")
+            logger.error(f"状态恢复失败: {e}", exc_info=True)
 
     async def run_autonomous_loop(self):
         """
@@ -704,8 +704,7 @@ class AutonomousAgent:
                                 })
 
                         except Exception as e:
-                            logger.error(f"工具执行错误: {e}")
-                            traceback.print_exc()
+                            logger.error(f"工具执行错误: {e}", exc_info=True)
                             error_msg = f"Error: {str(e)}"
 
                             if t_id:

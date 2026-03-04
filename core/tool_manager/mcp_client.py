@@ -42,7 +42,7 @@ class MCPClient:
             await self._refresh_tools()
 
         except Exception as e:
-            logger.error(f"MCP服务器 [{self.name}] 启动失败: {e}")
+            logger.error(f"MCP服务器 [{self.name}] 启动失败: {e}", exc_info=True)
             raise
 
     async def _initialize(self):

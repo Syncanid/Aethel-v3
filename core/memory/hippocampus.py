@@ -62,7 +62,7 @@ class Hippocampus:
                         recovered_msg["metadata"]["_wal_id"] = event_id
                         await self.slow_lane_queue.put(recovered_msg)
         except Exception as e:
-            logger.error(f"WAL 恢复失败: {e}")
+            logger.error(f"WAL 恢复失败: {e}", exc_info=True)
 
         # 标记当前历史为已处理
         for msg in self.history_ref:
@@ -157,7 +157,7 @@ class Hippocampus:
                     last_dream_time = current_time
 
             except Exception as e:
-                logger.error(f"Dream loop error: {e}")
+                logger.error(f"Dream loop error: {e}", exc_info=True)
                 await asyncio.sleep(5)
 
     def _scan_delta(self) -> List[Dict]:
@@ -278,7 +278,7 @@ class Hippocampus:
                 logger.info(f"归档完成: 为 {len(set(m['puid'] for m in memories))} 位用户生成了 {len(memories)} 条记忆")
 
         except Exception as e:
-            logger.error(f"记忆转换失败: {e}")
+            logger.error(f"记忆转换失败: {e}", exc_info=True)
 
     async def review_tool_mistake(self, tool_name: str, original_args: Dict, error: str, fixed_args: Dict):
         """
@@ -323,5 +323,5 @@ Agent 在使用工具 `{tool_name}` 时失败并触发了自愈机制。
             return rule
 
         except Exception as e:
-            logger.error(f"Failed to review tool mistake: {e}")
+            logger.error(f"Failed to review tool mistake: {e}", exc_info=True)
             return None

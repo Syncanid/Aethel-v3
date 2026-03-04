@@ -19,6 +19,10 @@ llm:
   model_name: "gpt-4o"
   small_model: "gpt-4o-mini"
   model_context: 32767
+
+  # 推理/思考模式开关
+  enable_reasoning: false
+
   # 工具调用策略配置
   # true: 在返回的 JSON content 中检测 tool_calls 字段
   # false: 使用 API 原生的 tool_calls 字段返回

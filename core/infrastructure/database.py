@@ -139,7 +139,7 @@ class Database:
                 try:
                     await db.execute(sql)
                 except Exception as e:
-                    logger.error(f"初始化表 {table} 失败: {e}")
+                    logger.error(f"初始化表 {table} 失败: {e}", exc_info=True)
             await db.commit()
         logger.info(f"数据库已就绪: {self.db_path}")
 

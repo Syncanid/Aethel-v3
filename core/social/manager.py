@@ -54,7 +54,7 @@ class UserManager:
                     self._cache[puid] = profile
                     return profile
                 except Exception as e:
-                    logger.error(f"用户数据解析失败 {puid}: {e}")
+                    logger.error(f"用户数据解析失败 {puid}: {e}", exc_info=True)
         return None
 
     async def list_users(self, limit: int = 20, offset: int = 0) -> List[UserProfile]:
@@ -72,7 +72,7 @@ class UserManager:
                 try:
                     profiles.append(UserProfile.from_dict(json.loads(row[0])))
                 except Exception as e:
-                    logger.error(f"用户数据解析失败: {e}")
+                    logger.error(f"用户数据解析失败: {e}", exc_info=True)
             return profiles
 
     async def save_user(self, profile: UserProfile):

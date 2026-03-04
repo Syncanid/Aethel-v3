@@ -53,7 +53,7 @@ class AppraisalSystem:
         try:
             # 使用较快的模型或默认模型
             resp = await self.api_client.create_chat_completion(
-                messages=[{"role": "system", "content": prompt}],
+                messages=[{"role": "user", "content": prompt}],
                 model=self.api_client.small_model,
                 schema={
                     "type": "object",
@@ -75,5 +75,5 @@ class AppraisalSystem:
             return result
 
         except Exception as e:
-            logger.error(f"Appraisal failed: {e}")
+            logger.error(f"Appraisal failed: {e}", exc_info=True)
             return {}

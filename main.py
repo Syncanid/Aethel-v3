@@ -4,6 +4,7 @@ import logging
 import sys
 import threading
 import argparse
+import traceback
 from typing import List, Optional
 
 from core.gui.monitor_registry import monitor_registry
@@ -192,7 +193,7 @@ if __name__ == "__main__":
             try:
                 loop.run_until_complete(system.shutdown())
             except Exception as e:
-                logger.error(f"关闭过程中发生错误: {e}")
+                logger.error(f"关闭过程中发生错误: {e}", exc_info=True)
             loop.close()
             sys.exit(0)
 

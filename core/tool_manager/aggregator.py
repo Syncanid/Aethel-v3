@@ -63,7 +63,7 @@ class ToolManager:
                     # 合并 Schema
                     self._schemas.extend(client.get_tools())
                 except Exception as e:
-                    logger.error(f"MCP服务器 {name} 加载失败: {e}")
+                    logger.error(f"MCP服务器 {name} 加载失败: {e}", exc_info=True)
 
     def _load_local_tools(self):
         """扫描 tools 目录并注册"""
@@ -78,7 +78,7 @@ class ToolManager:
                     importlib.import_module(module_name)
                     logger.debug(f"已导入工具: {module_name}")
                 except Exception as e:
-                    logger.error(f"工具组件 {module_name} 导入失败: {e}")
+                    logger.error(f"工具组件 {module_name} 导入失败: {e}", exc_info=True)
 
         # 获取所有通过 @register 注册的函数
         pending = get_pending_functions()
@@ -130,11 +130,11 @@ class ToolManager:
             return result
 
         except Exception as e:
-            error_msg = str(e)
-            logger.error(f"工具 {name} 执行异常: {error_msg}")
+            logger.error(f"工具 {name} 执行异常: {e}", exc_info=True)
 
             # 判断是否值得自愈
             # 仅当错误看起来像参数错误时才重试
+            error_msg = str(e)
             should_heal = False
             keywords = ["argument", "missing", "type", "value", "json", "format", "invalid"]
             if any(k in error_msg.lower() for k in keywords):
@@ -283,7 +283,7 @@ class ToolManager:
             return fixed_args
 
         except Exception as e:
-            logger.error(f"Self-healing failed: {e}")
+            logger.error(f"Self-healing failed: {e}", exc_info=True)
             return None
 
     async def reload_tool_module(self, module_name: str) -> str:

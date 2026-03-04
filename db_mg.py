@@ -173,7 +173,7 @@ class UniversalTableTab(QWidget):
                 self.columns_info = [dict(row) for row in cursor.fetchall()]
                 self.pk_names = [col['name'] for col in self.columns_info if col['pk'] > 0]
         except Exception as e:
-            logger.error(f"Failed to load schema for {self.table_name}: {e}")
+            logger.error(f"Failed to load schema for {self.table_name}: {e}", exc_info=True)
 
     def init_ui(self):
         layout = QVBoxLayout()
@@ -452,7 +452,7 @@ class VectorDBTab(QWidget):
                 item = QTableWidgetItem(c.name)
                 self.coll_list.setItem(i, 0, item)
         except Exception as e:
-            logger.error(f"Chroma refresh failed: {e}")
+            logger.error(f"Chroma refresh failed: {e}", exc_info=True)
 
     def load_collection_data(self, item):
         if not self.client: return

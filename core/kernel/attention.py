@@ -160,7 +160,8 @@ class AttentionFilter:
         return passed, log_msg
 
     # --- 核心组件 2：LLM 软规则 ---
-    async def _check_soft_rules(self, event: OneBotEvent, threshold: float, state_desc: str, recent_history: Optional[List[Dict]] = None) -> ReactionType:
+    async def _check_soft_rules(self, event: OneBotEvent, threshold: float, state_desc: str,
+                                recent_history: Optional[List[Dict]] = None) -> ReactionType:
         """
         LLM 决策层：只有通过了语义门控的消息才会到达这里。
         """
@@ -229,7 +230,7 @@ class AttentionFilter:
         try:
             # 使用 create_chat_completion 的 schema 模式强制结构化输出
             response = await self.api_client.create_chat_completion(
-                messages=[{"role": "system", "content": prompt}],
+                messages=[{"role": "user", "content": prompt}],
                 model=self.api_client.small_model,
                 schema={
                     "type": "object",
@@ -264,7 +265,7 @@ class AttentionFilter:
             return ReactionType.OBSERVE
 
         except Exception as e:
-            logger.error(f"Attention LLM check failed: {e}")
+            logger.error(f"Attention LLM check failed: {e}", exc_info=True)
             # 发生错误时保持安静，避免刷屏
             return ReactionType.OBSERVE
 

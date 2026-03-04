@@ -50,7 +50,7 @@ class ConsoleAdapter(BaseAdapter):
                 self.event_bus.publish_event(event)
 
             except Exception as e:
-                logger.error(f"控制台输入错误: {e}")
+                logger.error(f"控制台输入错误: {e}", exc_info=True)
                 await asyncio.sleep(1)
 
     async def handle_action(self, action: Action) -> Optional[ActionResponse]:

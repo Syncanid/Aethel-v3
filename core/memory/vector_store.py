@@ -151,7 +151,8 @@ class VectorStore:
                         )
                         # [同步更新 SQLite]
                         async with self.db.get_connection() as conn:
-                            await conn.execute("UPDATE text_search_index SET content=? WHERE doc_id=?", (final_content, target_id))
+                            await conn.execute("UPDATE text_search_index SET content=? WHERE doc_id=?",
+                                               (final_content, target_id))
                             await conn.commit()
                         logger.info(f"语义记忆已更新 (内容增强): {final_content[:20]}...")
                     else:
@@ -252,7 +253,7 @@ class VectorStore:
                 text_results.append({
                     "id": r[0],
                     "content": r[1],
-                    "metadata": {}, # 文本检索可能丢失 metadata，RRF 阶段会尝试互补
+                    "metadata": {},  # 文本检索可能丢失 metadata，RRF 阶段会尝试互补
                     "type": "text"
                 })
 
@@ -272,9 +273,9 @@ class VectorStore:
             # 如果有 metadata 则使用高级格式化 (显示时间)
             if item.get('metadata'):
                 formatted = self._format_memory_content(item['content'], item['metadata'])
-                tag = "情景" if "episodic" in str(item.get('metadata', '')) else "知识" # 简易判断
+                tag = "情景" if "episodic" in str(item.get('metadata', '')) else "知识"  # 简易判断
                 # 覆盖 tag
-                formatted = formatted.replace("] ", f" | {tag}] ", 1) # 插入类型标签
+                formatted = formatted.replace("] ", f" | {tag}] ", 1)  # 插入类型标签
             else:
                 # 纯文本回退格式
                 formatted = f"[精确匹配] {item['content']}"
@@ -325,7 +326,7 @@ class VectorStore:
                     await conn.commit()
             return True
         except Exception as e:
-            logger.error(f"删除记忆失败: {e}")
+            logger.error(f"删除记忆失败: {e}", exc_info=True)
             return False
 
     async def update_memory_content(self, memory_type: str, memory_id: str, new_content: str, user_id: str) -> bool:
@@ -346,11 +347,12 @@ class VectorStore:
                     )
                     # [同步更新 SQLite]
                     async with self.db.get_connection() as conn:
-                        await conn.execute("UPDATE text_search_index SET content=? WHERE doc_id=?", (new_content, memory_id))
+                        await conn.execute("UPDATE text_search_index SET content=? WHERE doc_id=?",
+                                           (new_content, memory_id))
                         await conn.commit()
             return True
         except Exception as e:
-            logger.error(f"更新记忆失败: {e}")
+            logger.error(f"更新记忆失败: {e}", exc_info=True)
             return False
 
     async def list_memories(self, memory_type: str, user_id: str, limit: int = 50, offset: int = 0) -> List[Dict]:

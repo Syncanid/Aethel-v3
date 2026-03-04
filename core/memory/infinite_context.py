@@ -114,7 +114,7 @@ class InfiniteContextManager:
             # 新结构: [System] + [Infinite Context Summary] + [Recent Messages]
 
             summary_message = {
-                "role": "system",  # 或者用 user，视模型遵循能力而定
+                "role": "user",
                 "content": f"以下是之前的对话记忆摘要，请基于此继续对话：\n{new_summary}"
             }
 
@@ -129,7 +129,7 @@ class InfiniteContextManager:
             return True
 
         except Exception as e:
-            logger.error(f"[InfiniteContext] 压缩过程发生错误: {e}")
+            logger.error(f"[InfiniteContext] 压缩过程发生错误: {e}", exc_info=True)
             return False
 
     async def _generate_summary(self, text: str) -> str:

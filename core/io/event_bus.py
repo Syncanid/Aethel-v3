@@ -69,7 +69,7 @@ class EventBus:
 
             for res in results:
                 if isinstance(res, Exception):
-                    logger.error(f"Action handler failed: {res}")
+                    logger.error(f"Action handler failed: {res}", exc_info=True)
                     if not final_response:
                         final_response = ActionResponse(status=ActionStatus.FAILED,
                                                         message=f"Handler error: {str(res)}")
@@ -91,7 +91,7 @@ class EventBus:
             )
 
         except asyncio.TimeoutError:
-            logger.error(f"Action dispatch timed out: {action.action}")
+            logger.error(f"Action dispatch timed out: {action.action}", exc_info=True)
             return ActionResponse(status=ActionStatus.FAILED, message="Action execution timed out")
         except Exception as e:
             logger.error(f"EventBus dispatch error: {e}", exc_info=True)

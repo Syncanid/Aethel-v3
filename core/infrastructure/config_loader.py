@@ -28,7 +28,7 @@ class Config:
                 self._config = yaml.safe_load(f)
             logger.info(f"配置已加载: {config_path}")
         except Exception as e:
-            logger.error(f"加载配置文件失败: {e}")
+            logger.error(f"加载配置文件失败: {e}", exc_info=True)
             raise
 
     def get(self, key: str, default: Any = None) -> Any:
