@@ -105,7 +105,6 @@ async def wait(
         scheduler: AsyncIOScheduler,
         event_bus: EventBus,
         agent: AutonomousAgent,
-        reason: str,
         duration: Optional[float] = None,
         until: Optional[str] = None,
 ) -> str:
@@ -115,7 +114,6 @@ async def wait(
     注意：在等待期间，如果有新的用户消息，系统依然会被打断并处理。
 
     Args:
-        reason: 唤醒时的提示信息。
         duration: 等待的分钟 (相对时间)。
         until: 等待直到具体的日期时间 (绝对时间)，ISO 格式。
     """
@@ -155,7 +153,7 @@ async def wait(
             agent.is_sleeping = True
 
         timestamp_str = run_date.strftime("%Y-%m-%d %H:%M:%S")
-        return f"已进入休眠模式。系统将在 {timestamp_str} 唤醒，原因: {reason}。"
+        return f"已进入休眠模式。系统将在 {timestamp_str} 唤醒。"
     else:
         return "系统错误: 调度器未初始化。"
 

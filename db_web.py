@@ -24,7 +24,7 @@ except ImportError:
 # --- 配置 ---
 DB_PATH = "data/storage.db"
 VECTOR_PATH = "data/vector_store"
-HOST = "127.0.0.1"
+HOST = "0.0.0.0"
 PORT = 8088
 
 # --- 日志 ---
@@ -67,8 +67,8 @@ async def get_index():
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Aethel Trinity 数据终端</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/vue@3.3.4/dist/vue.global.prod.js"></script>
+    <link href="https://jsd.cdn.zzko.cn/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://jsd.cdn.zzko.cn/npm/vue@3.3.4/dist/vue.global.prod.js"></script>
     <style>
         body { background-color: #f8f9fa; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
         .sidebar { min-height: 100vh; background-color: #343a40; color: #fff; }
@@ -227,7 +227,7 @@ async def get_index():
 
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://jsd.cdn.zzko.cn/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
     const { createApp, ref, onMounted } = Vue;
 

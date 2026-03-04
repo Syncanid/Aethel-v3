@@ -316,7 +316,7 @@ Agent 在使用工具 `{tool_name}` 时失败并触发了自愈机制。
             # 存入向量库 (假设 puid='system' 或 'global' 代表通用知识)
             await self.vector_store.save_vector_memory(
                 SemanticMemory(content=memory_content),
-                puid="global_tool_rules"
+                user_id="global_tool_rules"
             )
 
             logger.info(f"🧠 [Hippocampus] 习得新经验: {rule}")

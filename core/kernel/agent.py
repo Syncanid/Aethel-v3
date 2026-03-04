@@ -480,7 +480,7 @@ class AutonomousAgent:
                 self._prune_context()
 
                 # 主动记忆检索 (RAG)
-                retrieved_memories = await self._active_retrieval()
+                # retrieved_memories = await self._active_retrieval()
 
                 # 动态生成 System Prompt
                 # 1. 获取当前神经状态
@@ -491,7 +491,7 @@ class AutonomousAgent:
                 # 2. 生成带有状态描述的 Prompt
                 system_prompt_base = self.prompt_manager.get_system_prompt(
                     neuro_state=current_neuro_state,
-                    memory_context=retrieved_memories,
+                    # memory_context=retrieved_memories,
                     social_context=current_interactor,
                     interest_context=current_interest
                 )
@@ -1022,7 +1022,7 @@ class AutonomousAgent:
             messages=sanitized_history,
             tools=tools if tools else None,
             schema=thought_structure,
-            tool_choice="none" if use_schema_tools else "auto"
+            tool_choice="auto" if use_schema_tools else "required"
         )
 
         return response["choices"][0]["message"]

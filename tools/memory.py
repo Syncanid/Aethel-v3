@@ -1,4 +1,6 @@
 # tools/memory.py
+import logging
+
 from core.infrastructure.api_client import GenericAPIClient
 from core.infrastructure.config_loader import get_config
 from core.infrastructure.database import Database
@@ -12,6 +14,7 @@ from core.tool_manager.registry import register
 # 懒加载单例，避免循环导入问题
 _store = None
 
+logger = logging.getLogger(__name__)
 
 def _get_store():
     global _store
