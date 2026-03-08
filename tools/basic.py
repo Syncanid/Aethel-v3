@@ -11,6 +11,22 @@ logger = logging.getLogger(__name__)
 
 
 @register()
+async def think(event_bus: EventBus, thought: str) -> None:
+    """
+    [Cognition] 执行思考
+    当你面对复杂问题、需要制定计划、或者反思错误时，必须使用此工具。
+
+    Args:
+        thought: 你的思考过程
+    """
+    event_bus.publish_action(Action(
+        action="broadcast_log",
+        params={"content": f"💭 {thought}"}
+    ))
+    return None
+
+
+@register()
 async def advanced_think(
         api_client: GenericAPIClient,
         tool_manager: Any,
@@ -21,7 +37,7 @@ async def advanced_think(
 ) -> Dict[str, Any]:
     """
     [Cognition] 执行结构化思考过程，为 AI Agent 提供可解释的推理步骤。
-    当你面对复杂问题、需要制定计划、或者反思错误时，必须使用此工具。
+    当think无法解决问题时使用此工具。
 
     Args:
         goal: 当前需要解决的核心目标或问题。

@@ -49,8 +49,7 @@ class AutonomousAgent:
             "last_context": {}
         }
         self.last_response_content = ""  # 用于死锁检测
-        self.last_observation_text = None
-        self.consecutive_idle_count = 0  # 空转计数器
+        self.last_response_used_tools = True
 
         # 初始化注意力门控系统
         self.attention = AttentionFilter(
@@ -652,8 +651,7 @@ class AutonomousAgent:
 
                 # 3. 执行工具列表
                 if tool_execution_queue:
-                    # 有工具执行，重置空转计数器
-                    self.consecutive_idle_count = 0
+                    self.last_response_used_tools = True
 
                     for task in tool_execution_queue:
                         name = task["name"]
@@ -720,27 +718,8 @@ class AutonomousAgent:
                                     "name": name,
                                     "content": error_msg
                                 })
-
-                # 空转检测与熔断
                 else:
-                    max_allowed_idle = 2
-                    # 没有执行任何工具
-                    self.consecutive_idle_count += 1
-                    logger.warning(f"⚠️ 空转检测: {self.consecutive_idle_count}/{max_allowed_idle}")
-
-                    if self.consecutive_idle_count >= max_allowed_idle:
-                        logger.warning("🚫 触发空转熔断：强制注入警告。")
-                        self.history.append({
-                            "role": "user",
-                            "content": "SYSTEM WARNING: 检测到你连续多次进行思考但未执行任何操作（未调用工具）。\n"
-                                       "1. 如果你在等待用户回复，必须调用 `wait` 工具挂起。\n"
-                                       "2. 如果你任务已完成，请调用 `wait` 进入待命。\n"
-                                       "3. 禁止无意义的循环思考。"
-                        })
-                        # 重置计数器以免一直刷屏，或者让模型有机会反应
-                        self.consecutive_idle_count = 0
-
-                    await asyncio.sleep(1)
+                    self.last_response_used_tools = False
 
             except Exception as e:
                 logger.error(f"主循环异常: {e}", exc_info=True)
@@ -1021,7 +1000,7 @@ class AutonomousAgent:
             messages=sanitized_history,
             tools=tools if tools else None,
             schema=thought_structure,
-            tool_choice="auto" if use_schema_tools else "required"
+            tool_choice="auto" if use_schema_tools else ("auto" if self.last_response_used_tools else "required")
         )
 
         return response["choices"][0]["message"]

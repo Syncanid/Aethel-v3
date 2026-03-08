@@ -107,6 +107,7 @@ async def wait(
         agent: AutonomousAgent,
         duration: Optional[float] = None,
         until: Optional[str] = None,
+        reason: Optional[str] = None,
 ) -> str:
     """
     让系统进入等待/挂起状态。
@@ -116,6 +117,7 @@ async def wait(
     Args:
         duration: 等待的分钟 (相对时间)。
         until: 等待直到具体的日期时间 (绝对时间)，ISO 格式。
+        reason: 启动等待的原因。
     """
 
     # 1. 计算触发时间
