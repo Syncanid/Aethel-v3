@@ -521,7 +521,7 @@ class AutonomousAgent:
                     self.history.insert(0, {"role": "system", "content": final_system_prompt})
 
                 try:
-                    async with aiofiles.open("data/messages_in_memory.txt", "w", encoding="utf-8") as f:
+                    async with aiofiles.open("data/messages_in_memory.json", "w", encoding="utf-8") as f:
                         await f.write(json.dumps(self.history, ensure_ascii=False, indent=4))
 
                     async with aiofiles.open("data/prompt_in_memory.txt", "w", encoding="utf-8") as f:

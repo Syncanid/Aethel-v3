@@ -338,7 +338,6 @@ prime_directives:
         return f"""
 ## 当前显意识关注
 - 核心关注点: {interest}
-- 注意力策略: 系统应优先处理与上述话题相关的信息。对于无关话题，可适当降低处理深度或通过“无聊机制”进行过滤。
 """
 
     def get_system_prompt(self,

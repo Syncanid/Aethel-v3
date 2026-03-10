@@ -1,4 +1,4 @@
-# tools/core.py
+# tools/core_tool.py
 import asyncio
 import datetime
 import logging
@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 @register()
 async def send_message(
         message: str,
-        target_id: str,
         platform: str,
+        target_id: str,
         target_type: Literal["private", "group", "channel"],
         event_bus: EventBus = None,
 ) -> str:
@@ -29,8 +29,8 @@ async def send_message(
 
     Args:
         message: 消息内容。
-        target_id: 目标用户ID 或 群组ID。
-        platform: 目标平台。
+        platform: 目标平台（PUID的前半部分）。
+        target_id: 目标user_id或group_id（PUID的后半部分）。
         target_type: 消息类型 ('private', 'group', 'channel')。
     """
 
@@ -108,7 +108,7 @@ async def wait(
         duration: Optional[float] = None,
         until: Optional[str] = None,
         reason: Optional[str] = None,
-) -> str:
+) -> Optional[str]:
     """
     让系统进入等待/挂起状态。
     系统会挂起当前任务，直到指定时间到达后通过事件被唤醒。
@@ -154,49 +154,48 @@ async def wait(
             agent.wakeup_job_id = job.id
             agent.is_sleeping = True
 
-        timestamp_str = run_date.strftime("%Y-%m-%d %H:%M:%S")
-        return f"已进入休眠模式。系统将在 {timestamp_str} 唤醒。"
+        return None
     else:
         return "系统错误: 调度器未初始化。"
 
 
-# @register()
-# async def wait_forever(
-#         reason: str,
-#         agent: Any = None,
-#         event_bus: EventBus = None
-# ) -> str:
-#     """
-#     [Control] 进入无限期休眠状态，直到收到外部事件（如用户消息）唤醒。
-#
-#     Args:
-#         reason: 休眠的具体原因。
-#     """
-#     if agent:
-#         # 如果存在之前的定时唤醒任务（例如之前的 wait 设置的），则取消它
-#         # 避免定时器在休眠期间意外触发唤醒
-#         if hasattr(agent, "wakeup_job_id") and agent.wakeup_job_id:
-#             try:
-#                 # 假设 agent.scheduler 是 AsyncIOScheduler 实例
-#                 agent.scheduler.remove_job(agent.wakeup_job_id)
-#                 logger.info(f"[WaitForever] 已移除原有的定时唤醒任务: {agent.wakeup_job_id}")
-#             except Exception as e:
-#                 # 忽略任务不存在的错误
-#                 logger.debug(f"[WaitForever] 移除定时任务失败 (可能已不存在): {e}")
-#             agent.wakeup_job_id = None
-#
-#         # 强制设置休眠标志
-#         agent.is_sleeping = True
-#         logger.info(f"Agent entering infinite sleep: {reason}")
-#
-#     # 广播系统状态变更
-#     if event_bus:
-#         event_bus.publish_action(Action(
-#             action="broadcast_log",
-#             params={"content": f"💤 系统进入无限期待命状态: {reason}"}
-#         ))
-#
-#     return f"系统已进入无限期待命状态 ({reason})。停止思考循环，等待外部事件唤醒。"
+@register()
+async def wait_forever(
+        agent: Any = None,
+        event_bus: EventBus = None,
+        reason: Optional[str] = None,
+) -> Optional[str]:
+    """
+    [Control] 进入无限期休眠状态，直到收到外部事件唤醒。
+    优先使用wait工具，尽量不使用wait_forever工具。
+
+    Args:
+        reason: 启动休眠的原因。
+    """
+    if agent:
+        # 如果存在之前的定时唤醒任务（例如之前的 wait 设置的），则取消它
+        # 避免定时器在休眠期间意外触发唤醒
+        if hasattr(agent, "wakeup_job_id") and agent.wakeup_job_id:
+            try:
+                # 假设 agent.scheduler 是 AsyncIOScheduler 实例
+                agent.scheduler.remove_job(agent.wakeup_job_id)
+                logger.info(f"[WaitForever] 已移除原有的定时唤醒任务: {agent.wakeup_job_id}")
+            except Exception as e:
+                # 忽略任务不存在的错误
+                logger.debug(f"[WaitForever] 移除定时任务失败 (可能已不存在): {e}")
+            agent.wakeup_job_id = None
+
+        # 强制设置休眠标志
+        agent.is_sleeping = True
+
+    # 广播系统状态变更
+    if event_bus:
+        event_bus.publish_action(Action(
+            action="broadcast_log",
+            params={"content": f"💤 系统进入无限期待命状态: {reason}"}
+        ))
+
+    return None
 
 
 @register()
