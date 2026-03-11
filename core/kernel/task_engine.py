@@ -3,17 +3,17 @@ import asyncio
 import json
 import logging
 import os
+from typing import List, Dict, Any, Optional
 
 import aiofiles
-from typing import List, Dict, Any, Optional
 
 from core.infrastructure.api_client import GenericAPIClient
 from core.infrastructure.config_loader import Config
 from core.infrastructure.database import Database
 from core.io.event_bus import EventBus
 from core.io.event_schema import OneBotEvent, DetailType, EventType
-from core.tool_manager.aggregator import ToolManager
 from core.kernel.task_registry import global_task_registry
+from core.tool_manager.aggregator import ToolManager
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +136,7 @@ class TaskEngine:
                 elif detail_type == DetailType.TASK_UPDATE or detail_type == "task_update":
                     payload = getattr(event, "extra", {}).get("task_payload", {})
                     task_id = payload.get("task_id")
-                    info = payload.get("description") # S1 将补充信息塞在这个字段了
+                    info = payload.get("description")  # S1 将补充信息塞在这个字段了
 
                     if self.is_busy and self.scratchpad.get("current_task_id") == task_id:
                         logger.info(f"📥 [System 2] 收到实时补充信息: {info}")

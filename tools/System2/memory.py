@@ -16,6 +16,7 @@ _store = None
 
 logger = logging.getLogger(__name__)
 
+
 def _get_store():
     global _store
     if not _store:

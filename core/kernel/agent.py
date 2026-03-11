@@ -17,6 +17,7 @@ from core.io.event_schema import OneBotEvent, Action, DetailType, EventType
 from core.io.middleware import MiddlewareManager
 from core.kernel.attention import AttentionFilter, ReactionType
 from core.kernel.prompt import PromptManager
+from core.kernel.task_registry import global_task_registry
 from core.limbic.manager import LimbicManager
 from core.memory.hippocampus import Hippocampus
 from core.memory.infinite_context import InfiniteContextManager
@@ -24,7 +25,6 @@ from core.memory.vector_store import VectorStore
 from core.social.manager import UserManager
 from core.tool_manager.aggregator import ToolManager
 from core.utilities import calculate_tokens
-from core.kernel.task_registry import global_task_registry
 
 logger = logging.getLogger(__name__)
 

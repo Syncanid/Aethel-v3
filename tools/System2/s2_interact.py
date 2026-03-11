@@ -1,6 +1,6 @@
 # System2Tools/s2_interact.py
-from core.tool_manager.registry import register
 from core.io.event_schema import OneBotEvent, EventType, DetailType, TaskPayload, EventSource
+from core.tool_manager.registry import register
 
 
 @register()

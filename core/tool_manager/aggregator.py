@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 
 
 class ToolManager:
-    def __init__(self, tools_dir: str, config: Config, event_bus: EventBus, api_client: GenericAPIClient, database: Database,
+    def __init__(self, tools_dir: str, config: Config, event_bus: EventBus, api_client: GenericAPIClient,
+                 database: Database,
                  agent_state: Dict[str, Any]):
         self.tools_dir = tools_dir
         self.config = config

@@ -2,8 +2,9 @@
 import json
 import os
 import time
-from core.tool_manager.registry import register
+
 from core.io.event_schema import OneBotEvent, EventType, DetailType, TaskPayload, EventSource
+from core.tool_manager.registry import register
 
 
 @register()

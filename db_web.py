@@ -1,23 +1,17 @@
 import logging
-import logging
 import os
 from typing import Dict, Any
 
 import aiosqlite
+import chromadb
 import uvicorn
+from chromadb.config import Settings
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-# 尝试导入 ChromaDB
-try:
-    import chromadb
-    from chromadb.config import Settings
-
-    HAS_CHROMA = True
-except ImportError:
-    HAS_CHROMA = False
+HAS_CHROMA = True
 
 # --- 配置 ---
 DB_PATH = "data/storage.db"

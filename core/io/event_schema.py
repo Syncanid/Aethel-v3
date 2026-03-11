@@ -39,8 +39,8 @@ class DetailType(str, Enum):
     TASK_DISPATCH = "task_dispatch"  # S1 派发任务给 S2
     TASK_PROGRESS = "task_progress"  # S2 汇报进度给 S1
     TASK_COMPLETE = "task_complete"  # S2 任务完成
-    TASK_CANCEL = "task_cancel"      # S1 强制取消 S2 任务
-    TASK_UPDATE = "task_update"      # S1 向 S2 发送实时补充信息
+    TASK_CANCEL = "task_cancel"  # S1 强制取消 S2 任务
+    TASK_UPDATE = "task_update"  # S1 向 S2 发送实时补充信息
 
 
 class ActionStatus(str, Enum):

@@ -1,10 +1,9 @@
 # main.py
+import argparse
 import asyncio
 import logging
 import sys
 import threading
-import argparse
-import traceback
 from typing import List, Optional
 
 from core.gui.monitor_registry import monitor_registry

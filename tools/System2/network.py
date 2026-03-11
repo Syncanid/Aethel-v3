@@ -201,10 +201,10 @@ async def download_file(
 
     try:
         async with httpx.AsyncClient(
-            headers=json_headers,
-            timeout=httpx.Timeout(timeout),
-            follow_redirects=True,
-            proxy=_get_proxies(config)
+                headers=json_headers,
+                timeout=httpx.Timeout(timeout),
+                follow_redirects=True,
+                proxy=_get_proxies(config)
         ) as client:
             # 先发送 HEAD 或 GET 请求获取文件信息（使用 stream 模式）
             async with client.stream("GET", url) as resp:
