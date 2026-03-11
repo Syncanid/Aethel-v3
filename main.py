@@ -18,6 +18,7 @@ from core.io.adapters.onebot_v11 import OneBotV11Adapter
 from core.io.event_bus import EventBus
 # --- 认知内核层 ---
 from core.kernel.agent import AutonomousAgent
+from core.kernel.task_engine import TaskEngine
 
 # --- 装饰 ---
 BANNER = r"""
@@ -43,6 +44,7 @@ class AethelSystem:
         self.db = None
         self.bus = None
         self.agent = None
+        self.task_engine = None
         self.recorder = None
         self.adapters = []
 
@@ -68,9 +70,12 @@ class AethelSystem:
         # 4. 启动神经总线
         self.bus = EventBus()
 
-        # 5. 唤醒 Agent (大脑)
+        # 5. 唤醒 Agent
         # Agent 内部会自动初始化 ToolManager, Hippocampus, Scheduler
         self.agent = AutonomousAgent(self.config, self.bus, self.db)
+
+        # 初始化 TaskEngine
+        self.task_engine = TaskEngine(self.config, self.bus, self.db)
 
         # 6. 加载适配器 (感官)
         console_adapter = ConsoleAdapter(self.bus)
@@ -105,7 +110,11 @@ class AethelSystem:
         agent_task = asyncio.create_task(self.agent.run_autonomous_loop(), name="Agent-Core")
         self.tasks.append(agent_task)
 
-        # 2. 启动适配器
+        # 2. 启动 Task Engine 主循环
+        engine_task = asyncio.create_task(self.task_engine.run_engine_loop(), name="Task-Engine")
+        self.tasks.append(engine_task)
+
+        # 3. 启动适配器
         for adapter in self.adapters:
             t = asyncio.create_task(adapter.run(), name=f"Adapter-{adapter.platform_name}")
             self.tasks.append(t)

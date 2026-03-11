@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 class PromptManager:
     def __init__(self, config: Config):
         self.config = config
-        self.prompt_path = config.get("llm.prompt_file", "data/prompts/system_prompt.md")
+        self.prompt_path = "data/prompts/system1_prompt.md"
         self.role_yaml_path = config.get("llm.role_card", "data/prompts/role_card.yaml")
         self._ensure_prompt_file()
         self._ensure_role_yaml()
@@ -377,7 +377,7 @@ prime_directives:
             system_block,
             time_block,
             neuro_block,
-            interest_block,
+            # interest_block,
             social_block,
             mimicry_block,
             memory_block

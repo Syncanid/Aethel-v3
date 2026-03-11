@@ -13,6 +13,7 @@ class EventType(str, Enum):
     MESSAGE = "message"
     NOTICE = "notice"
     REQUEST = "request"
+    TASK = "task"
 
 
 class DetailType(str, Enum):
@@ -26,16 +27,37 @@ class DetailType(str, Enum):
     PRIVATE = "private"
     GROUP = "group"
     CHANNEL = "channel"
+
     # Notice
     MEMBER_INCREASE = "group_member_increase"
     MEMBER_DECREASE = "group_member_decrease"
+
     # Request
     FRIEND = "friend"
+
+    # Task S1 与 S2 的通信类型
+    TASK_DISPATCH = "task_dispatch"  # S1 派发任务给 S2
+    TASK_PROGRESS = "task_progress"  # S2 汇报进度给 S1
+    TASK_COMPLETE = "task_complete"  # S2 任务完成
+    TASK_CANCEL = "task_cancel"      # S1 强制取消 S2 任务
+    TASK_UPDATE = "task_update"      # S1 向 S2 发送实时补充信息
 
 
 class ActionStatus(str, Enum):
     OK = "ok"
     FAILED = "failed"
+
+
+# --- 任务载荷模型 ---
+class TaskPayload(BaseModel):
+    """
+    用于附加在 OneBotEvent.extra['task_payload'] 中的结构化任务数据
+    """
+    task_id: str
+    description: Optional[str] = None
+    progress_msg: Optional[str] = None
+    result: Optional[str] = None
+    parameters: Dict[str, Any] = {}
 
 
 # --- 基础模型 ---

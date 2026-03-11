@@ -1,13 +1,93 @@
+import datetime
 import json
 import logging
 from typing import Literal, Optional, Dict, Any, List
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from dateutil import parser
+
 from core.infrastructure.api_client import GenericAPIClient
 from core.io.event_bus import EventBus
-from core.io.event_schema import Action
+from core.io.event_schema import Action, OneBotEvent, EventType, EventSource
+from core.kernel.agent import AutonomousAgent
 from core.tool_manager.registry import register
 
 logger = logging.getLogger(__name__)
+
+
+# --- 内部辅助函数：发送唤醒事件 ---
+async def _dispatch_wake_up(event_bus: EventBus, reason: str):
+    """调度器回调：发送唤醒事件"""
+    logger.info(f"⏰ 等待结束，触发唤醒: {reason}")
+    event = OneBotEvent(
+        type=EventType.NOTICE,  # 使用 Notice 类型
+        detail_type="wake_up",
+        sub_type="timer",
+        source=EventSource(platform="system"),
+        message=f"【系统唤醒】: {reason}",
+        alt_message=f"【系统唤醒】: {reason}",
+        extra={"status": "wake_up"}
+    )
+    event_bus.publish_event(event)
+
+
+@register()
+async def wait(
+        scheduler: AsyncIOScheduler,
+        event_bus: EventBus,
+        agent: AutonomousAgent,
+        duration: Optional[float] = None,
+        until: Optional[str] = None,
+        reason: Optional[str] = None,
+) -> Optional[str]:
+    """
+    让系统进入等待/挂起状态。
+    系统会挂起当前任务，直到指定时间到达后通过事件被唤醒。
+    注意：在等待期间，如果有新的用户消息，系统依然会被打断并处理。
+
+    Args:
+        duration: 等待的分钟 (相对时间)。
+        until: 等待直到具体的日期时间 (绝对时间)，ISO 格式。
+        reason: 启动等待的原因。
+    """
+
+    # 1. 计算触发时间
+    if until:
+        try:
+            # 使用 dateutil 解析自然语言或 ISO 时间
+            run_date = parser.parse(until)
+            # 如果解析出的时间没有时区，且当前是 Awareness 的，需处理 (这里简化，假设本地时间)
+            if run_date < datetime.datetime.now():
+                return f"错误: 目标时间 {until} 已经是过去式了。"
+        except Exception as e:
+            return f"错误: 无法解析时间字符串 '{until}'。请使用 ISO 格式 (YYYY-MM-DD HH:MM:SS)。"
+
+    elif duration is not None:
+        if duration <= 0:
+            return "错误: 等待时长必须大于 0。"
+        run_date = datetime.datetime.now() + datetime.timedelta(minutes=duration)
+
+    else:
+        return "错误: 必须提供 'duration' (分) 或 'until' (日期字符串) 其中之一。"
+
+    # 2. 添加调度任务
+    if scheduler and run_date:
+        # 获取 job 对象
+        job = scheduler.add_job(
+            _dispatch_wake_up,
+            'date',
+            run_date=run_date,
+            args=[event_bus, "等待超时"]
+        )
+
+        # 将 Job ID 绑定到 Agent 实例，用于后续取消
+        if agent:
+            agent.wakeup_job_id = job.id
+            agent.is_sleeping = True
+
+        return None
+    else:
+        return "系统错误: 调度器未初始化。"
 
 
 @register()

@@ -19,8 +19,9 @@ logger = logging.getLogger(__name__)
 
 
 class ToolManager:
-    def __init__(self, config: Config, event_bus: EventBus, api_client: GenericAPIClient, database: Database,
+    def __init__(self, tools_dir: str, config: Config, event_bus: EventBus, api_client: GenericAPIClient, database: Database,
                  agent_state: Dict[str, Any]):
+        self.tools_dir = tools_dir
         self.config = config
         self.event_bus = event_bus
         self.api_client = api_client
@@ -67,13 +68,12 @@ class ToolManager:
 
     def _load_local_tools(self):
         """扫描 tools 目录并注册"""
-        tools_dir = "tools"
-        if not os.path.exists(tools_dir):
-            os.makedirs(tools_dir)
+        if not os.path.exists(self.tools_dir):
+            os.makedirs(self.tools_dir)
 
-        for filename in os.listdir(tools_dir):
+        for filename in os.listdir(self.tools_dir):
             if filename.endswith(".py") and not filename.startswith("_"):
-                module_name = f"tools.{filename[:-3]}"
+                module_name = f"{self.tools_dir.replace('/', '.')}.{filename[:-3]}"
                 try:
                     importlib.import_module(module_name)
                     logger.debug(f"已导入工具: {module_name}")

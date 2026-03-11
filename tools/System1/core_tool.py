@@ -60,7 +60,7 @@ async def send_message(
         # 3. 处理不同的结果状态
         if response.status == ActionStatus.OK:
             # 成功
-            return f"消息已发送 [{platform}] {target_type}: {target_id}"
+            return f"消息已完成发送 [{platform}] {target_type}: {target_id}"
 
         else:
             # 失败处理

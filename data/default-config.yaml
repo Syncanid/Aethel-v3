@@ -34,7 +34,6 @@ llm:
 
   embedding_model_name: "text-embedding-ada-002"
 
-  prompt_file: "data/prompts/system_prompt.md"
   role_card: "data/prompts/role_card.yaml"
 
 proxy:

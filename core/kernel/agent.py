@@ -24,6 +24,7 @@ from core.memory.vector_store import VectorStore
 from core.social.manager import UserManager
 from core.tool_manager.aggregator import ToolManager
 from core.utilities import calculate_tokens
+from core.kernel.task_registry import global_task_registry
 
 logger = logging.getLogger(__name__)
 
@@ -41,15 +42,11 @@ class AutonomousAgent:
         # --- 内部状态 ---
         self.history: List[Dict[str, Any]] = []
         self.scratchpad: Dict[str, Any] = {
-            "current_goal": "",
-            "subtasks": [],
-            "variables": {},
-            "progress_summary": "",
             "current_interactor": {},
             "last_context": {}
         }
         self.last_response_content = ""  # 用于死锁检测
-        self.last_response_used_tools = True
+        self.next_response_use_tools = False
 
         # 初始化注意力门控系统
         self.attention = AttentionFilter(
@@ -64,6 +61,7 @@ class AutonomousAgent:
 
         # --- 初始化工具管理器 ---
         self.tool_manager = ToolManager(
+            tools_dir="tools/System1",
             config=config,
             event_bus=event_bus,
             api_client=self.api_client,
@@ -221,8 +219,8 @@ class AutonomousAgent:
         self.history.append(history_item)
         logger.info(f"Event Ingested: {event.type}.{event.detail_type}")
 
-        # 如果是内部驱动，唤醒系统
-        if event.detail_type == DetailType.INTERNAL_DRIVE:
+        # 唤醒系统
+        if event.detail_type in [DetailType.INTERNAL_DRIVE, DetailType.TASK_PROGRESS, DetailType.TASK_COMPLETE]:
             self.is_sleeping = False
             self.force_sleep = False
 
@@ -256,8 +254,6 @@ class AutonomousAgent:
             logger.info(f"🗣️ [Responder] 决定介入 ({reaction.value}): {event.id}")
             self._should_think_after_event = True
 
-            # 如果收到新事件，重置空转计数器
-            self.consecutive_idle_count = 0
             if self.wakeup_job_id:
                 try:
                     self.scheduler.remove_job(self.wakeup_job_id)
@@ -337,7 +333,6 @@ class AutonomousAgent:
         try:
             snapshot = {
                 "scratchpad": self.scratchpad,
-                "consecutive_idle_count": self.consecutive_idle_count,
                 "is_sleeping": self.is_sleeping,
                 "force_sleep": self.force_sleep,
                 "timestamp": time.time()
@@ -370,7 +365,6 @@ class AutonomousAgent:
                     snapshot = json.loads(row[0])
                     # 恢复状态
                     self.scratchpad.update(snapshot.get("scratchpad", {}))
-                    self.consecutive_idle_count = snapshot.get("consecutive_idle_count", 0)
                     self.is_sleeping = snapshot.get("is_sleeping", False)
                     self.force_sleep = snapshot.get("force_sleep", False)
 
@@ -495,6 +489,9 @@ class AutonomousAgent:
                     interest_context=current_interest
                 )
 
+                # 读取 TaskRegistry
+                bg_tasks_xml = await global_task_registry.render_for_prompt()
+
                 # 3. 附加 Scratchpad
                 scratchpad_dump = json.dumps(self.scratchpad, indent=2, ensure_ascii=False)
 
@@ -508,6 +505,21 @@ class AutonomousAgent:
                     f"这是你必须维护的内部状态，每次响应必须更新此状态：\n"
                     f"{scratchpad_dump}"
                 )
+
+                if bg_tasks_xml:
+                    final_system_prompt += (
+                        f"\n\n后台任务：\n"
+                        f"{bg_tasks_xml}"
+                    )
+
+                if self._current_reaction:
+                    reaction_hint = (
+                        f"\n\n<Subconscious_Hint>\n"
+                        f"注意力系统给你的行动建议是：【{self._current_reaction.value}】。\n"
+                        f"如果是主动插话，请用随性、自然的口吻切入；如果是被直接提及，请正面回应。\n"
+                        f"</Subconscious_Hint>"
+                    )
+                    final_system_prompt += reaction_hint
 
                 monitor_registry.register_text_source(
                     "系统", "System Prompt",
@@ -579,9 +591,8 @@ class AutonomousAgent:
                 self.last_response_content = content_str
 
                 # --- C. 行动阶段 (Action) ---
-
+                self.next_response_use_tools = False
                 tool_execution_queue = []  # 待执行任务列表: {name, args, id(可选)}
-                thought_content = ""
 
                 # 1. 尝试解析 Schema 模式的 JSON
                 if content_str:
@@ -594,6 +605,7 @@ class AutonomousAgent:
                         # 构造思考日志
                         emotion = monologue.get("emotion_check", "Neutral")
                         plan = monologue.get("planning", "No plan")
+                        action = parsed_data.get("action", "reply")
 
                         # 更新 Scratchpad
                         new_scratchpad = parsed_data.get("scratchpad", None)
@@ -604,8 +616,14 @@ class AutonomousAgent:
                         # 广播思考过程 (EventBus)
                         self.event_bus.publish_action(Action(
                             action="broadcast_log",
-                            params={"content": f"🧠 心流: [{emotion}] {plan}"}
+                            params={"content": f"🧠 心流: [{emotion}] {plan} | 决定{action}"}
                         ))
+
+                        if action in ["ignore"]:
+                            self.force_sleep = True
+
+                        if action in ["reply", "action", "tool"]:
+                            self.next_response_use_tools = True
 
                         # 提取 Schema Tool Calls
                         schema_calls = parsed_data.get("tool_calls", [])
@@ -642,17 +660,8 @@ class AutonomousAgent:
                             "id": t_id
                         })
 
-                # 记录思考
-                if thought_content:
-                    self.event_bus.publish_action(Action(
-                        action="broadcast_log",
-                        params={"content": f"💭 {thought_content}"}
-                    ))
-
                 # 3. 执行工具列表
                 if tool_execution_queue:
-                    self.last_response_used_tools = True
-
                     for task in tool_execution_queue:
                         name = task["name"]
                         args = task["args"]
@@ -718,12 +727,10 @@ class AutonomousAgent:
                                     "name": name,
                                     "content": error_msg
                                 })
-                else:
-                    self.last_response_used_tools = False
 
             except Exception as e:
-                logger.error(f"主循环异常: {e}", exc_info=True)
-                await asyncio.sleep(5)  # 出错冷却
+                logger.error(f"S1 主循环异常: {e}", exc_info=True)
+                await asyncio.sleep(2)
 
     def _transcribe_event(self, event: OneBotEvent) -> str:
         """
@@ -748,6 +755,22 @@ class AutonomousAgent:
         if event.type == EventType.REQUEST:
             if event.detail_type == "friend":
                 return f"【好友申请】收到来自用户 {event.source.user_id} 的好友申请。"
+
+        if event.type == EventType.TASK:
+            payload = event.extra.get("task_payload", {})
+            task_id = payload.get("task_id", "unknown")
+
+            if event.detail_type == DetailType.TASK_PROGRESS:
+                if event.extra.get("requires_user_input"):
+                    return f"【后台紧急呼叫】任务 {task_id} 被挂起，需要你向用户确认：'{payload.get('description')}'"
+                else:
+                    return f"【后台状态更新】任务 {task_id} 进度：'{payload.get('progress_msg')}'"
+
+            if event.detail_type == DetailType.TASK_COMPLETE:
+                return f"【后台任务完成】任务 {task_id} 已结束。结果：\n{payload.get('result')}"
+
+            if event.detail_type == DetailType.TASK_CANCEL:
+                return f"【系统提示】任务 {task_id} 已被成功取消。"
 
         # 4. 兜底策略：如果是复杂的未知事件，才使用简化版 JSON
         simple_data = {k: v for k, v in event.model_dump().items() if k in ['type', 'detail_type', 'source']}
@@ -922,45 +945,22 @@ class AutonomousAgent:
                         "type": "string",
                         "description": "自检当前的生理状态和情绪基调。"
                     },
-                    "intention": {
-                        "type": "string",
-                        "description": "明确当前的行动意图。例如：'安抚用户情绪'、'执行搜索任务' 或 '结束对话'。"
-                    },
                     "planning": {
                         "type": "string",
                         "description": "具体的思维链推理过程。"
-                    }
+                    },
                 },
-                "required": ["emotion_check", "intention", "planning"],
+                "required": ["emotion_check", "planning"],
                 "additionalProperties": False
             },
-            # 2. 状态层
-            "scratchpad": {
-                "type": "object",
-                "properties": {
-                    "current_goal": {"type": "string", "description": "当前目标"},
-                    "subtasks": {
-                        "type": "array",
-                        "description": "任务列表。",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "id": {"type": "integer"},
-                                "description": {"type": "string"},
-                                "status": {"type": "string", "enum": ["pending", "working", "done", "failed"]}
-                            },
-                            "required": ["id", "description", "status"],
-                            "additionalProperties": False
-                        }
-                    },
-                    "progress_summary": {"type": "string", "description": "已完成的工作"}
-                },
-                "required": ["current_goal", "subtasks", "progress_summary"],
-                "additionalProperties": False
-            }
+            "action": {
+                "type": "string",
+                "enum": ["reply", "action", "tool", "ignore"],
+                "description": "动作：reply(回复这条消息)、action(需要调用wait挂起等待、派发任务等)、tool(需要调用工具)、ignore(厌恶/不想理睬)"
+            },
         }
 
-        required_fields = ["inner_monologue", "scratchpad"]
+        required_fields = ["inner_monologue", "action"]
 
         # 根据配置决定是否将 tool_calls 注入 Schema
         if use_schema_tools:
@@ -1000,7 +1000,7 @@ class AutonomousAgent:
             messages=sanitized_history,
             tools=tools if tools else None,
             schema=thought_structure,
-            tool_choice="auto" if use_schema_tools else ("auto" if self.last_response_used_tools else "required")
+            tool_choice="auto" if use_schema_tools else ("required" if self.next_response_use_tools else "auto")
         )
 
         return response["choices"][0]["message"]
