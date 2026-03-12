@@ -14,7 +14,9 @@ from core.infrastructure.database import Database
 from core.io.event_bus import EventBus
 from core.io.event_schema import OneBotEvent, DetailType, EventType, Action
 from core.kernel.task_registry import global_task_registry
+from core.memory.infinite_context import InfiniteContextManager
 from core.tool_manager.aggregator import ToolManager
+from core.utilities import calculate_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +69,9 @@ class TaskEngine:
 
         # 依赖注入
         self.tool_manager.add_dependency("task_engine", self)
+
+        self.context_manager = InfiniteContextManager(config, self.api_client)
+        self.last_response_content = ""
 
         # --- 事件队列与订阅 ---
         self.incoming_events: asyncio.Queue = asyncio.Queue()
@@ -121,6 +126,7 @@ class TaskEngine:
                 "history": self.history,
                 "scratchpad": self.scratchpad,
                 "last_response_used_tools": self.last_response_used_tools,
+                "last_response_content": self.last_response_content,
                 "current_task_info": {
                     "task_id": getattr(self, "_current_task_id", ""),
                     "description": getattr(self, "_current_task_desc", ""),
@@ -158,6 +164,7 @@ class TaskEngine:
                         self.history = state.get("history", [])
                         self.scratchpad.update(state.get("scratchpad", {}))
                         self.last_response_used_tools = state.get("last_response_used_tools", True)
+                        self.last_response_content = state.get("last_response_content", "")
 
                         info = state.get("current_task_info", {})
                         self._current_task_id = info.get("task_id")
@@ -172,6 +179,35 @@ class TaskEngine:
         except Exception as e:
             logger.error(f"S2 状态恢复失败: {e}", exc_info=True)
         return False
+
+    def _prune_context(self):
+        """[应急防爆] 强制上下文修剪，防止 TaskEngine 内存溢出"""
+        TOKEN_LIMIT_APPROX = self.config.get("llm.model_context", 16384)
+        SAFE_LIMIT = TOKEN_LIMIT_APPROX - 200
+
+        current_tokens = sum(calculate_tokens(msg.get("content", "")) for msg in self.history)
+
+        while len(self.history) > 6 and current_tokens > SAFE_LIMIT:
+            candidate_idx = 1
+            msg_to_remove = self.history[candidate_idx]
+
+            # 兼容工具调用链删除
+            is_tool_call_msg = (msg_to_remove.get("role") == "assistant" and
+                                (msg_to_remove.get("tool_calls") or msg_to_remove.get("function_call")))
+
+            count_to_remove = 1
+            if is_tool_call_msg:
+                scan_idx = candidate_idx + 1
+                while scan_idx < len(self.history) and self.history[scan_idx].get("role") == "tool":
+                    count_to_remove += 1
+                    scan_idx += 1
+
+            for _ in range(count_to_remove):
+                if len(self.history) > 1:
+                    removed = self.history.pop(candidate_idx)
+                    current_tokens -= calculate_tokens(removed.get("content", ""))
+
+            logger.warning(f"✂️ [System 2 应急防御] Token超出安全限制，已强制切割 {count_to_remove} 条历史消息。")
 
     async def run_engine_loop(self):
         """
@@ -311,6 +347,10 @@ class TaskEngine:
 
             # ================= 长循环开始 =================
             while True:
+                # 触发脱水压缩与防爆
+                await self.context_manager.compress_if_needed(self.history)
+                self._prune_context()
+
                 # --- A. 更新 System Prompt 与状态同步 ---
                 scratchpad_dump = json.dumps(self.scratchpad, indent=2, ensure_ascii=False)
                 final_system_prompt = (
@@ -343,6 +383,18 @@ class TaskEngine:
                     content_str = "{}"
 
                 native_tool_calls = response_msg.get("tool_calls", [])
+
+                # 致命死锁检测 (如果完全一致且没调用原生工具，直接打断)
+                if content_str and content_str == self.last_response_content and not native_tool_calls:
+                    logger.error("⚠️ [System 2] 检测到严重死锁。")
+                    self.history.append({
+                        "role": "user",
+                        "content": "【SYSTEM ERROR - DEADLOCK DETECTED】系统检测到你输出了与上一次完全一致的内容，且未执行任何有效动作！这会导致无限死循环！请立即改变规划思路，如果方法行不通，请调用 `conclude_task` 汇报失败，绝不许死磕！"
+                    })
+                    self.last_response_content = ""
+                    continue # 直接跳入下一轮让模型反思
+
+                self.last_response_content = content_str
 
                 # 回填历史记录
                 if native_tool_calls:

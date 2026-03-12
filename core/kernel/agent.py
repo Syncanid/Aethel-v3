@@ -47,6 +47,7 @@ class AutonomousAgent:
         }
         self.last_response_content = ""  # 用于死锁检测
         self.next_response_use_tools = False
+        self.last_observation_text = ""  # 初始化最后一次观察到的文本
 
         # 初始化注意力门控系统
         self.attention = AttentionFilter(
@@ -273,38 +274,38 @@ class AutonomousAgent:
         """中间件链的终点"""
         pass
 
-    def _prune_context(self):
+    def _prune_context(self) -> int:
         """
-        检查并修剪对话历史，防止超过 Token 限制。
-        此函数作为 LLM 调用前的一个预处理，基于对中英文和图片Token的估算。
-        智能识别 Tool Call 对，确保成对删除。
+        [应急防爆] 强制上下文物理修剪 (S1)
+        作为 InfiniteContext 之后的最后一道物理防线。
+        哪怕切掉的是早期的脱水记忆，也必须保证系统能顺利调用 LLM，防止死锁崩溃。
         """
         # 尝试从配置获取上下文限制
         TOKEN_LIMIT_APPROX = self.config.get("llm.model_context", 16384)
-        SAFE_LIMIT = TOKEN_LIMIT_APPROX - 500
+        SAFE_LIMIT = TOKEN_LIMIT_APPROX - 200
 
-        current_estimated_tokens = 0
+        # 重新精准盘点当前 Token
+        current_estimated_tokens = sum(calculate_tokens(msg.get("content", "")) for msg in self.history)
 
-        # 1. 计算当前总 Token
-        for msg in self.history:
-            current_estimated_tokens += calculate_tokens(msg.get("content"))
+        # 如果 Token 安全，什么都不做，直接返回
+        if current_estimated_tokens <= SAFE_LIMIT:
+            return current_estimated_tokens
 
-        # 始终保留 System Prompt (index 0) 和最近的 5 条消息
+        logger.warning(f"⚠️ [S1 应急防御] Token估算 ({int(current_estimated_tokens)}) 突破物理红线 ({SAFE_LIMIT})！InfiniteContext 压制失效，启动强制切割。")
+
+        # 始终保留 System Prompt (index 0) 和最近的一小部分消息以维持最小对话惯性
         while len(self.history) > 6 and current_estimated_tokens > SAFE_LIMIT:
-            # 从 index 1 开始检查 (跳过 system)
             candidate_idx = 1
             msg_to_remove = self.history[candidate_idx]
 
-            # 判断是否是 Tool Call 的发起者
-            # 兼容 OpenAI 格式 (tool_calls 字段) 和旧格式
+            # 兼容 API 规范：如果删除了发起 tool_calls 的 assistant 消息，
+            # 必须连同它后面跟随的所有 role: "tool" 结果一起删掉，否则 OpenAI/主流模型 接口会直接报错。
             is_tool_call_msg = (msg_to_remove.get("role") == "assistant" and
                                 (msg_to_remove.get("tool_calls") or msg_to_remove.get("function_call")))
 
             count_to_remove = 1
 
             if is_tool_call_msg:
-                # 如果删除了 tool_calls，必须删除后面紧跟的所有 role='tool' 消息
-                # 扫描后续消息
                 scan_idx = candidate_idx + 1
                 while scan_idx < len(self.history):
                     next_msg = self.history[scan_idx]
@@ -314,16 +315,13 @@ class AutonomousAgent:
                     else:
                         break
 
-                logger.info(f"✂️ [Context] 检测到工具调用链，将批量移除 {count_to_remove} 条消息。")
-
-            # 执行移除
+            # 执行物理移除 (从头开始切)
             for _ in range(count_to_remove):
-                if len(self.history) > 1:  # 再次检查防止越界
+                if len(self.history) > 1:  # 再次检查，绝对不能切掉 index 0 的 System Prompt
                     removed = self.history.pop(candidate_idx)
-                    current_estimated_tokens -= calculate_tokens(removed.get("content"))
+                    current_estimated_tokens -= calculate_tokens(removed.get("content", ""))
 
-            logger.info(f"✂️ [Context] 修剪后估算: {int(current_estimated_tokens)}")
-
+        logger.warning(f"✂️ [S1 应急防御] 强制切割完成。当前剩余 Token 估算: {int(current_estimated_tokens)}")
         return current_estimated_tokens
 
     async def save_state(self):
@@ -926,8 +924,9 @@ class AutonomousAgent:
         if current_goal:
             query_parts.append(f"关注点: {current_goal}")
 
-        if self.last_observation_text:
-            query_parts.append(f"上下文: {self.last_observation_text}")
+        last_obs = getattr(self, "last_observation_text", "")
+        if last_obs:
+            query_parts.append(f"上下文: {last_obs}")
 
         if not query_parts:
             # 如果什么都没有，就不浪费 Token 去搜了

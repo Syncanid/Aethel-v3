@@ -11,7 +11,7 @@ def get_log_filename(base_name):
     return filename
 
 
-def calculate_tokens(content: Any) -> float:
+def calculate_tokens(content: Any) -> int:
     """
     [辅助方法] 计算单个内容块的 Token 估算值
     逻辑源自 v1 planner.py，区分中英文和图片

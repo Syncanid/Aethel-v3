@@ -1,5 +1,7 @@
 # core/tool_manager/output_cache.py
+import json
 import logging
+import os
 import time
 import uuid
 from typing import Optional
@@ -11,25 +13,46 @@ logger = logging.getLogger(__name__)
 
 
 class ToolOutputCache:
-    """全局工具输出暂存池"""
-    _cache = {}
+    """全局工具输出持久化暂存池"""
     _api_client: Optional[GenericAPIClient] = None
+    CACHE_DIR = "data/cache/tool_outputs"
+
+    @classmethod
+    def _ensure_dir(cls):
+        """确保缓存目录存在"""
+        if not os.path.exists(cls.CACHE_DIR):
+            os.makedirs(cls.CACHE_DIR, exist_ok=True)
 
     @classmethod
     def save(cls, content: str) -> str:
-        """保存完整输出并返回凭证号 (Receipt ID)"""
+        """保存完整输出到本地文件并返回凭证号 (Receipt ID)"""
+        cls._ensure_dir()
         receipt_id = f"out_{uuid.uuid4().hex[:8]}"
-        cls._cache[receipt_id] = {
+        filepath = os.path.join(cls.CACHE_DIR, f"{receipt_id}.json")
+
+        data = {
             "content": content,
             "timestamp": time.time()
         }
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"保存工具输出缓存失败: {e}", exc_info=True)
+
         return receipt_id
 
     @classmethod
     def get(cls, receipt_id: str) -> Optional[str]:
-        """根据凭证号获取原始输出"""
-        if receipt_id in cls._cache:
-            return cls._cache[receipt_id]["content"]
+        """根据凭证号从本地文件读取原始输出"""
+        filepath = os.path.join(cls.CACHE_DIR, f"{receipt_id}.json")
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return data.get("content")
+            except Exception as e:
+                logger.error(f"读取工具输出缓存失败: {e}", exc_info=True)
         return None
 
     @classmethod
@@ -40,11 +63,8 @@ class ToolOutputCache:
 
     @classmethod
     async def refine_content(cls, raw_content: str, purpose: str) -> str:
-        """
-        调用 LLM，根据 Agent 的【目的】对长文本进行针对性提炼
-        """
+        """调用 LLM 进行针对性提炼"""
         api = cls._get_api_client()
-
         prompt = f"""
 请你作为一个极度精准的“信息过滤器”。
 以下是一个工具返回的【长篇原始输出】。请严格根据执行 Agent 的【调用目的】，从中提取并总结出唯一有用的信息。
@@ -82,18 +102,7 @@ class ToolOutputCache:
 
     @classmethod
     async def process_tool_output(cls, raw_content: str, purpose: str, threshold: int = 200) -> tuple[str, str, str]:
-        """
-        [辅助函数] 一键完成：保存原文 -> 提炼内容 -> 拼装最终回复
-
-        Args:
-            raw_content: 工具产生的大量原始输出
-            purpose: Agent 调用该工具的目的
-            threshold: 触发提炼的字符数阈值。低于此值直接返回，节省 Token。
-
-        Returns:
-            tuple: (receipt_id, refined_result, final_response)
-        """
-        # 1. 长度熔断：如果输出本来就很短，不需要浪费 Token 去提炼
+        """一键完成：保存原文 -> 提炼内容 -> 拼装最终回复"""
         if len(raw_content) < threshold:
             # 依然保存一下，以防万一
             receipt_id = cls.save(raw_content)
@@ -109,10 +118,7 @@ class ToolOutputCache:
         # 4. 拼装标准化带有“收据后门”的系统提示
         final_response = f"""{refined_result}
 
-    ---
-    [系统提示]: 以上输出已根据您的目的进行了精简过滤。
-    原始长文本数据已暂存，凭证号为: {receipt_id}。
-    如需查看全部细节，请调用 `read_full_output` 工具；
-    若想换个目的重新提取，请调用 `refine_tool_output` 工具。"""
-
+---
+[系统提示]: 以上输出已根据您的目的 "{purpose}" 进行了精简。
+完整数据凭证号: {receipt_id}。如需查看全部细节请调用 `read_full_output`；更换目的提取请调用 `refine_tool_output`。"""
         return receipt_id, refined_result, final_response
