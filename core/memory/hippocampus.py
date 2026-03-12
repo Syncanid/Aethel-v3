@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 
 
 class Hippocampus:
-    def __init__(self, config: Config, limbic: LimbicManager, api_client: GenericAPIClient, database: Database, agent_history: List[Dict]):
+    def __init__(self, config: Config, limbic: LimbicManager, api_client: GenericAPIClient, database: Database,
+                 agent_history: List[Dict]):
         """
         :param agent_history: 对 AutonomousAgent.history 的直接引用
         """
@@ -165,14 +166,20 @@ class Hippocampus:
 
     async def _sleep_cycle_loop(self):
         """
-        睡眠周期：夜间执行 Episodic -> Semantic 压缩
+        睡眠周期：夜间执行 Episodic -> Semantic 压缩，以及图谱修剪
         """
         while self.is_running:
             # 每天凌晨 3 点执行压缩 (这里为了演示，可使用定时器或固定检测)
             now = time.localtime()
             if now.tm_hour == 3 and now.tm_min == 0:
-                logger.info("🌙 进入深度睡眠周期：开始压缩情景记忆...")
+                logger.info("🌙 进入深度睡眠周期：开始记忆维护...")
+
+                # 1. 压缩情景记忆
                 await self._compress_episodic_to_semantic()
+
+                # 2. 自动修剪与清理知识图谱
+                await self._prune_graph_edges()
+
                 await asyncio.sleep(60)  # 避免同一分钟内重复执行
 
             await asyncio.sleep(30)  # 每半分钟检查一次时间
@@ -211,6 +218,45 @@ class Hippocampus:
             self.database.episodic_collection.delete(ids=old_memories["ids"])
             logger.info(f"🧠 [睡眠压缩] 提取事实：{compressed_fact}，并删除了 {len(old_memories['ids'])} 条旧细节。")
 
+    async def _prune_graph_edges(self):
+        """
+        [Sleep Task] 知识图谱边缘修剪。
+        清理低权重、重复或极其老旧的图谱关系，防止超级节点爆炸。
+        """
+        try:
+            async with self.database.get_connection() as conn:
+                # 1. 清理完全重复的边 (Subject-Predicate-Object 完全一致，只保留最新的一条)
+                cleanup_duplicates_sql = """
+                                         DELETE \
+                                         FROM graph_edges
+                                         WHERE id NOT IN (SELECT MAX(id) \
+                                                          FROM graph_edges \
+                                                          GROUP BY source, target, relation, puid) \
+                                         """
+                cursor = await conn.execute(cleanup_duplicates_sql)
+                dup_deleted = cursor.rowcount
+
+                # 2. 衰减所有边的权重 (模拟记忆遗忘曲线)
+                # 每天衰减 5% 的权重
+                await conn.execute("UPDATE graph_edges SET weight = weight * 0.95")
+
+                # 3. 删除权重过低 (低于 0.1) 且时间超过 30 天的无效关系
+                thirty_days_ago = time.time() - (30 * 86400)
+                cleanup_weak_sql = """
+                                   DELETE \
+                                   FROM graph_edges
+                                   WHERE weight < 0.1 AND timestamp < ? \
+                                   """
+                cursor = await conn.execute(cleanup_weak_sql, (thirty_days_ago,))
+                weak_deleted = cursor.rowcount
+
+                await conn.commit()
+
+            logger.info(f"🕸️ [睡眠清理] 图谱维护完成: 删除了 {dup_deleted} 条重复边，{weak_deleted} 条过期弱连接边。")
+
+        except Exception as e:
+            logger.error(f"图谱修剪失败: {e}", exc_info=True)
+
     def _scan_delta(self) -> List[Dict]:
         """扫描增量消息 (仅在内存中操作，极快)"""
         new_msgs = []
@@ -243,31 +289,23 @@ class Hippocampus:
     async def _consolidate_memory(self, buffer: List[Dict]):
         """
         调用 LLM 进行记忆提取。
+        包含图谱抽取与记忆冲突消解的记忆巩固机制。
         """
         prompt = """
-你是一个顶尖的认知科学家，也是 AI 的“海马体”（记忆整理中枢）。
-你的任务是将短期的对话流转化为长期的、结构化的、高密度的记忆。
+你是一个顶尖的认知科学家与记忆状态机。
+你的任务是将短期的对话流转化为长期的事实、情景，并提取出【实体关系网络(图谱)】。
 
-## 输入说明
-输入是一段 JSON 格式的对话日志。
-- `user` 角色消息通常包含 `[Event Received]` 和一段 JSON 数据。
-- 你必须从该 JSON 数据中提取用户信息：`platform` 和 `user_id`。
-- 组合唯一标识符 PUID: `{platform}:{user_id}` (例如 `onebot:123456`)。
-
-## 任务要求
-1. 身份识别：对于每一条提取出的记忆，必须明确它属于哪个 PUID。
-2. 绝对事实化：
-   - 生成的 `content` 必须是自包含的，即使脱离当前对话上下文也能被理解。
-   - 错误示例："他喜欢吃苹果" (他是谁？)
-   - 正确示例："用户(onebot:123456) 喜欢吃苹果" 或 "User[Axw] is a Python developer."
-3. 分类提取：
-   - Core (核心): 用户的固有属性（姓名、性格、职业、长期偏好）。
-   - Episodic (情景): 发生了什么重要事件（时间、地点、人物、结果）。
-   - Semantic (语义): 通用的世界知识或事实（不依附于特定用户的知识）。
-
-## 输出 Schema
-请输出 JSON 对象，包含 `memories` 列表。每个 memory 必须包含 `puid` 字段。
-对于 Semantic 记忆，如果它不属于特定用户（是通用知识），`puid` 可填 "global"。
+## 输出要求 (JSON)
+1. `memories`: 独立的陈述事实。
+   - 必须包含 `puid` (如 onebot:123456)。
+   - `type`: core (核心画像), episodic (发生的事情), semantic (客观知识)。
+   - `content`: 绝对独立的完整陈述。
+   - `resolution_action`: 对于这条新记忆，它是全新的(ADD)，还是推翻/更新了之前的认知(UPDATE)，还是删除了之前的认知(DELETE)？默认填 ADD。
+2. `graph_edges`: 提取出这句话里的主谓宾逻辑。
+   - `source`: 主语实体 (如 用户名, "Aethel", "Python")
+   - `target`: 宾语实体
+   - `relation`: 关系动词 (如 "owns", "dislikes", "is_developing")
+   - `context`: 具体语境说明
 """
         # 简化输入内容，只发送 role 和 content
         input_data = [{"role": m["role"], "content": m.get("content", "")} for m in buffer]
@@ -283,20 +321,30 @@ class Hippocampus:
                         "items": {
                             "type": "object",
                             "properties": {
-                                "puid": {
-                                    "type": "string",
-                                    "description": "The unique user ID (platform:user_id) this memory belongs to, or 'global'."
-                                },
+                                "puid": {"type": "string"},
                                 "type": {"type": "string", "enum": ["core", "episodic", "semantic"]},
-                                "key": {"type": "string", "description": "Only for core memory (e.g. 'basic:name')"},
-                                "content": {"type": "string", "description": "Absolute fact statement."}
+                                "content": {"type": "string"},
+                                "resolution_action": {"type": "string", "enum": ["ADD", "UPDATE", "DELETE"]}
                             },
-                            "required": ["puid", "type", "key", "content"],
-                            "additionalProperties": False
+                            "required": ["puid", "type", "content", "resolution_action"]
+                        }
+                    },
+                    "graph_edges": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "puid": {"type": "string"},
+                                "source": {"type": "string"},
+                                "target": {"type": "string"},
+                                "relation": {"type": "string"},
+                                "context": {"type": "string"}
+                            },
+                            "required": ["puid", "source", "target", "relation"]
                         }
                     }
                 },
-                "required": ["memories"],
+                "required": ["memories", "graph_edges"],
                 "additionalProperties": False
             }
 
@@ -310,6 +358,7 @@ class Hippocampus:
 
             data = json.loads(resp["choices"][0]["message"]["content"])
             memories = data.get("memories", [])
+            graph_edges = data.get("graph_edges", [])
 
             # 在保存记忆前，获取当前边缘系统情绪
             current_state = await self.limbic.get_state()
@@ -317,27 +366,51 @@ class Hippocampus:
             cor = current_state.cortisol
             ser = current_state.serotonin
 
+            # 1. 存储节点与冲突消解
             for mem in memories:
                 puid = mem.get("puid", "unknown")
                 content = mem["content"]
+                action = mem["resolution_action"]
 
-                # 执行存储
                 if mem["type"] == "core":
-                    # Core memory 依然需要 key 来覆盖旧值
-                    key = mem.get("key", "misc")
+                    key = mem.get("key", f"extracted_{int(time.time())}")
                     await self.vector_store.save_core_memory(puid, key, content)
-                elif mem["type"] == "episodic":
-                    em = EpisodicMemory(content=content, emotion_dopamine=dop, emotion_cortisol=cor, emotion_serotonin=ser)
-                    await self.vector_store.save_vector_memory(em, puid)
-                elif mem["type"] == "semantic":
-                    sm = SemanticMemory(content=content, emotion_dopamine=dop, emotion_cortisol=cor, emotion_serotonin=ser)
-                    await self.vector_store.save_vector_memory(sm, puid)
+                else:
+                    # 【核心：冲突消解逻辑】
+                    if action == "UPDATE" or action == "DELETE":
+                        # 利用混合检索找到要更新/删除的旧记忆
+                        related_mems = await self.vector_store.search_memory(content, puid, limit=1)
+                        if related_mems:
+                            logger.info(f"🧠 [记忆消解] 识别到冲突，标记旧记忆状态失效: '{content}'")
+                            await self.vector_store.update_memory_status(content, puid, "inactive")
+
+                    if action != "DELETE":
+                        if mem["type"] == "episodic":
+                            em = EpisodicMemory(content=content, emotion_dopamine=dop, emotion_cortisol=cor,
+                                                emotion_serotonin=ser)
+                            await self.vector_store.save_vector_memory(em, puid)
+                        elif mem["type"] == "semantic":
+                            sm = SemanticMemory(content=content, emotion_dopamine=dop, emotion_cortisol=cor,
+                                                emotion_serotonin=ser)
+                            await self.vector_store.save_vector_memory(sm, puid)
+
+            # 2. 存储图谱边
+            if graph_edges:
+                async with self.database.get_connection() as conn:
+                    for edge in graph_edges:
+                        await conn.execute(
+                            "INSERT INTO graph_edges (source, target, relation, context, puid, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+                            (edge["source"], edge["target"], edge["relation"], edge.get("context", ""),
+                             edge.get("puid", "unknown"), time.time())
+                        )
+                    await conn.commit()
+                logger.info(f"🕸️ 提取并存储了 {len(graph_edges)} 条逻辑图谱关系。")
 
             if memories:
-                logger.info(f"归档完成: 为 {len(set(m['puid'] for m in memories))} 位用户生成了 {len(memories)} 条记忆")
+                logger.info(f"归档完成: 处理了 {len(memories)} 条记忆陈述")
 
         except Exception as e:
-            logger.error(f"记忆转换失败: {e}", exc_info=True)
+            logger.error(f"记忆转换与抽取失败: {e}", exc_info=True)
 
     async def review_tool_mistake(self, tool_name: str, original_args: Dict, error: str, fixed_args: Dict):
         """

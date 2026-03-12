@@ -73,3 +73,26 @@ class SemanticMemory(BaseMemory):
             "keywords": ",".join(self.keywords)
         })
         return meta
+
+
+@dataclass
+class GraphMemory(BaseMemory):
+    """
+    图谱记忆：记录实体与关系三元组 (Subject - Predicate -> Object)
+    用于支持 GraphRAG 和多跳推理
+    """
+    subject: str = ""
+    predicate: str = ""
+    obj: str = ""
+    weight: float = 1.0  # 关系权重，用于后期图计算或剪枝
+
+    def to_metadata(self) -> Dict[str, Any]:
+        meta = super().to_metadata()
+        meta.update({
+            "type": "graph",
+            "subject": self.subject,
+            "predicate": self.predicate,
+            "object": self.obj,
+            "weight": self.weight
+        })
+        return meta

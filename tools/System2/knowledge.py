@@ -27,7 +27,6 @@ def _get_components():
 @register()
 async def import_document(
         file_path: str,
-        event_bus: EventBus
 ) -> str:
     """
     [Knowledge] 从本地文本文件导入知识。

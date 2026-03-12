@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from typing import List, Dict, Any, Optional
 
 import aiofiles
@@ -16,6 +17,14 @@ from core.kernel.task_registry import global_task_registry
 from core.tool_manager.aggregator import ToolManager
 
 logger = logging.getLogger(__name__)
+
+
+class DummySource:
+    """用于恢复重启前的 Event Source 对象"""
+
+    def __init__(self, data):
+        for k, v in data.items():
+            setattr(self, k, v)
 
 
 class TaskEngine:
@@ -88,12 +97,90 @@ class TaskEngine:
             # 同时更新一下 Scratchpad 留档
             self.scratchpad["progress_summary"] = f"收到补充信息，正在重新评估..."
 
+    async def save_state(self):
+        """统一持久化 S2 状态与正在执行的任务进度现场"""
+        if not self.is_busy:
+            state = {"is_busy": False}
+        else:
+            source_dict = {}
+            if hasattr(self, "_current_task_source") and self._current_task_source:
+                source_dict = self._current_task_source.model_dump() if hasattr(self._current_task_source,
+                                                                                'model_dump') else self._current_task_source
+
+            state = {
+                "is_busy": self.is_busy,
+                "history": self.history,
+                "scratchpad": self.scratchpad,
+                "last_response_used_tools": self.last_response_used_tools,
+                "current_task_info": {
+                    "task_id": getattr(self, "_current_task_id", ""),
+                    "description": getattr(self, "_current_task_desc", ""),
+                    "params": getattr(self, "_current_task_params", {}),
+                    "source": source_dict
+                },
+                "timestamp": time.time()
+            }
+
+        try:
+            json_str = json.dumps(state, ensure_ascii=False)
+            async with self.database.get_connection() as conn:
+                await conn.execute(
+                    "INSERT OR REPLACE INTO neuro_states (user_id, data_json, last_update) VALUES (?, ?, ?)",
+                    ("UNIFIED_S2_STATE", json_str, time.time())
+                )
+                await conn.commit()
+        except Exception as e:
+            logger.error(f"S2 状态保存失败: {e}", exc_info=True)
+
+    async def load_state(self) -> bool:
+        """恢复 S2 完整执行现场，实现任务断点续传"""
+        try:
+            async with self.database.get_connection() as conn:
+                cursor = await conn.execute(
+                    "SELECT data_json FROM neuro_states WHERE user_id=?",
+                    ("UNIFIED_S2_STATE",)
+                )
+                row = await cursor.fetchone()
+                if row:
+                    state = json.loads(row[0])
+                    self.is_busy = state.get("is_busy", False)
+
+                    if self.is_busy:
+                        self.history = state.get("history", [])
+                        self.scratchpad.update(state.get("scratchpad", {}))
+                        self.last_response_used_tools = state.get("last_response_used_tools", True)
+
+                        info = state.get("current_task_info", {})
+                        self._current_task_id = info.get("task_id")
+                        self._current_task_desc = info.get("description")
+                        self._current_task_params = info.get("params")
+
+                        source_dict = info.get("source", {})
+                        self._current_task_source = DummySource(source_dict) if source_dict else None
+
+                        logger.info(f"🔄 发现中断的 S2 任务 [{self._current_task_id}]，准备恢复现场...")
+                        return True
+        except Exception as e:
+            logger.error(f"S2 状态恢复失败: {e}", exc_info=True)
+        return False
+
     async def run_engine_loop(self):
         """
         重循环守护进程，监听任务派发。
         """
         logger.info("⚙️ Task Engine (System 2) 已启动...")
         await self.tool_manager.initialize()
+
+        if await self.load_state():
+            self._running_task_coro = asyncio.create_task(
+                self._execute_long_loop(
+                    self._current_task_id,
+                    self._current_task_desc,
+                    self._current_task_params,
+                    self._current_task_source,
+                    is_resume=True  # 标记为断点恢复
+                )
+            )
 
         while True:
             try:
@@ -151,41 +238,66 @@ class TaskEngine:
             except Exception as e:
                 logger.error(f"Task Engine 监听循环异常: {e}", exc_info=True)
 
-    async def _execute_long_loop(self, task_id: str, description: str, params: dict, source):
+    async def _execute_long_loop(self, task_id: str, description: str, params: dict, source, is_resume: bool = False):
         """
-        [Core Loop] 从原 agent.py 阉割提取的长循环。
+        [Core Loop] 重循环守护任务。
         """
         self.is_busy = True
+        self._current_task_id = task_id
+        self._current_task_desc = description
+        self._current_task_params = params
+        self._current_task_source = source
+
         final_result = "Unknown"
         try:
-            # 1. 状态重置
-            self.history.clear()
-            self.scratchpad.update({
-                "current_task_id": task_id,
-                "current_goal": description,
-                "task_status": "normal",
-                "subtasks": [],
-                "progress_summary": "已接收指令，准备分析执行..."
-            })
-            self.tool_manager.agent_state = self.scratchpad
-            self.last_response_used_tools = True
+            if not is_resume:
+                # 1. 全新启动：重置并注册任务
+                self.history.clear()
+                self.scratchpad.update({
+                    "current_task_id": task_id,
+                    "current_goal": description,
+                    "task_status": "normal",
+                    "subtasks": [],
+                    "progress_summary": "已接收指令，准备分析执行..."
+                })
+                self.tool_manager.agent_state = self.scratchpad
+                self.last_response_used_tools = True
+                await global_task_registry.register_task(task_id, description)
 
-            # 更新全局看板
-            await global_task_registry.register_task(task_id, description)
+                # 读取基础 prompt
+                try:
+                    async with aiofiles.open("data/prompts/system2_prompt.md", "r", encoding="utf-8") as f:
+                        base_system_prompt = await f.read()
+                except FileNotFoundError:
+                    base_system_prompt = "You are Aethel's Task Engine."
 
-            # 2. 读取本地 System 2 专属 Prompt
-            try:
-                async with aiofiles.open("data/prompts/system2_prompt.md", "r", encoding="utf-8") as f:
-                    base_system_prompt = await f.read()
-            except FileNotFoundError:
-                base_system_prompt = "You are Aethel's Task Engine. Execute the requested tasks accurately."
+                self.history.append({"role": "system", "content": base_system_prompt})
+                self.history.append({
+                    "role": "user",
+                    "content": f"【任务派发】\n目标: {description}\n上下文参数: {json.dumps(params, ensure_ascii=False)}\n请通过工具分步执行，并输出最终结论。"
+                })
 
-            # 3. 注入系统和首次指令
-            self.history.append({"role": "system", "content": base_system_prompt})
-            self.history.append({
-                "role": "user",
-                "content": f"【任务派发】\n目标: {description}\n上下文参数: {json.dumps(params, ensure_ascii=False)}\n请通过工具分步执行，并输出最终结论。"
-            })
+                await self.save_state()  # 保存全新任务的第一帧
+            else:
+                # 2. 恢复启动：直接沿用缓存中的记录
+                self.tool_manager.agent_state = self.scratchpad
+
+                try:
+                    async with aiofiles.open("data/prompts/system2_prompt.md", "r", encoding="utf-8") as f:
+                        base_system_prompt = await f.read()
+                except FileNotFoundError:
+                    base_system_prompt = "You are Aethel's Task Engine."
+
+                # 更新 System prompt 防止代码改变
+                if self.history and self.history[0].get("role") == "system":
+                    self.history[0]["content"] = base_system_prompt
+
+                # 告知 Agent 发生了灾难恢复
+                self.history.append({
+                    "role": "user",
+                    "content": "【系统事件】系统刚刚经历了一次重启。你之前执行到一半的任务进度、历史和记忆已被完全恢复。请基于上面的记忆继续执行当前任务。"
+                })
+                await self.save_state()
 
             error_count = 0  # 追踪工具报错
 
@@ -300,9 +412,11 @@ class TaskEngine:
 
                             # 回填历史保证格式完备
                             if t_id:
-                                self.history.append({"role": "tool", "tool_call_id": t_id, "name": name, "content": f"Task Concluded with status: {status}"})
+                                self.history.append({"role": "tool", "tool_call_id": t_id, "name": name,
+                                                     "content": f"Task Concluded with status: {status}"})
                             else:
-                                self.history.append({"role": "tool", "name": name, "content": f"Task Concluded with status: {status}"})
+                                self.history.append(
+                                    {"role": "tool", "name": name, "content": f"Task Concluded with status: {status}"})
 
                             is_finished = True
                             break
@@ -314,7 +428,7 @@ class TaskEngine:
                             error_count = 0  # 成功执行则重置挫败感
                         except Exception as e:
                             result = f"Error: {str(e)}"
-                            error_count += 1 # 记录连续失败次数
+                            error_count += 1  # 记录连续失败次数
 
                             # 失败达到阈值，触发情绪泄露给 S1
                             if error_count >= 2:
@@ -329,7 +443,8 @@ class TaskEngine:
                                 self.event_bus.publish_event(frust_event)
 
                                 # 顺便污染一下 S2 自己的上下文，让它后面的规划更倾向于放弃或换思路
-                                self.history.append({"role": "system", "content": "【情绪警告】你现在感到极度烦躁，如果这个方向走不通，立刻换个思路或求助用户，不要死磕！"})
+                                self.history.append({"role": "system",
+                                                     "content": "【情绪警告】你现在感到极度烦躁，如果这个方向走不通，立刻换个思路或求助用户，不要死磕！"})
 
                         if t_id:
                             self.history.append(
@@ -338,6 +453,8 @@ class TaskEngine:
                             self.history.append({"role": "tool", "name": name, "content": str(result)})
                 else:
                     self.last_response_used_tools = False
+
+                await self.save_state()
 
                 if is_finished:
                     await global_task_registry.complete_task(task_id, final_result)
@@ -350,6 +467,8 @@ class TaskEngine:
                         extra={"task_payload": {"task_id": task_id, "result": final_result, "description": description}}
                     )
                     self.event_bus.publish_event(complete_event)
+                    self.is_busy = False
+                    await self.save_state()  # 任务结束，清空繁忙状态
                     break
 
         except asyncio.CancelledError:
@@ -381,6 +500,7 @@ class TaskEngine:
                 logger.error(f"任务归档失败: {e}")
 
             self.is_busy = False
+            await self.save_state()  # 确保清理现场
             self._running_task_coro = None
 
     async def _call_llm(self) -> Dict[str, Any]:

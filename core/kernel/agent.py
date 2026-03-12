@@ -326,54 +326,51 @@ class AutonomousAgent:
 
         return current_estimated_tokens
 
-    # 核心状态持久化方法
-    async def _save_snapshot(self):
-        """
-        固化 Agent 核心状态到数据库
-        应在思考步骤结束后或关键状态变更时调用
-        """
+    async def save_state(self):
+        """统一持久化 S1 的完整运行状态 (涵盖上下文历史、变量与生理状态)"""
         try:
-            snapshot = {
+            state = {
+                "history": self.history,
                 "scratchpad": self.scratchpad,
                 "is_sleeping": self.is_sleeping,
                 "force_sleep": self.force_sleep,
+                "last_response_content": self.last_response_content,
                 "timestamp": time.time()
             }
-            json_str = json.dumps(snapshot, ensure_ascii=False)
+            json_str = json.dumps(state, ensure_ascii=False)
 
             async with self.database.get_connection() as conn:
                 await conn.execute(
                     "INSERT OR REPLACE INTO neuro_states (user_id, data_json, last_update) VALUES (?, ?, ?)",
-                    (AGENT_STATE_KEY, json_str, time.time())
+                    ("UNIFIED_S1_STATE", json_str, time.time())
                 )
                 await conn.commit()
-            logger.debug("核心状态快照已保存")
         except Exception as e:
-            logger.error(f"状态快照保存失败: {e}", exc_info=True)
+            logger.error(f"S1 状态全量保存失败: {e}", exc_info=True)
 
-    # 核心状态恢复方法
-    async def _load_snapshot(self):
-        """
-        从数据库恢复 Agent 状态
-        """
+    async def load_state(self) -> bool:
+        """从统一存储中恢复 S1 的完整现场"""
         try:
             async with self.database.get_connection() as conn:
                 cursor = await conn.execute(
                     "SELECT data_json FROM neuro_states WHERE user_id=?",
-                    (AGENT_STATE_KEY,)
+                    ("UNIFIED_S1_STATE",)
                 )
                 row = await cursor.fetchone()
                 if row:
-                    snapshot = json.loads(row[0])
-                    # 恢复状态
-                    self.scratchpad.update(snapshot.get("scratchpad", {}))
-                    self.is_sleeping = snapshot.get("is_sleeping", False)
-                    self.force_sleep = snapshot.get("force_sleep", False)
+                    state = json.loads(row[0])
+                    self.history = state.get("history", [])
+                    self.scratchpad.update(state.get("scratchpad", {}))
+                    self.is_sleeping = state.get("is_sleeping", False)
+                    self.force_sleep = state.get("force_sleep", False)
+                    self.last_response_content = state.get("last_response_content", "")
 
-                    logger.info(f"🔄 成功恢复 Agent 核心状态 (上次保存: {time.ctime(snapshot.get('timestamp', 0))})")
-                    logger.info(f"   当前目标: {self.scratchpad.get('current_goal')}")
+                    logger.info(f"🔄 成功恢复 S1 完整运行现场 (上次运行时间: {time.ctime(state.get('timestamp', 0))})")
+                    logger.info(f"   当前上下文包含 {len(self.history)} 条对话记录。")
+                    return True
         except Exception as e:
-            logger.error(f"状态恢复失败: {e}", exc_info=True)
+            logger.error(f"S1 状态恢复失败: {e}", exc_info=True)
+        return False
 
     async def run_autonomous_loop(self):
         """
@@ -413,17 +410,28 @@ class AutonomousAgent:
         self.history.append({"role": "system", "content": system_prompt})
 
         # 2. 尝试恢复核心状态
-        await self._load_snapshot()
+        has_state = await self.load_state()
+
+        if not has_state:
+            # 首次启动：注入基础 Prompt 和启动消息
+            self.history.append({"role": "system", "content": system_prompt})
+            self.history.append({"role": "user", "content": "系统启动完成。"})
+        else:
+            # 恢复启动：更新最新的 system prompt（防止代码修改没生效）
+            if self.history and self.history[0].get("role") == "system":
+                self.history[0]["content"] = system_prompt
+            else:
+                self.history.insert(0, {"role": "system", "content": system_prompt})
+
+            # 向 Agent 发送断点恢复提示，让它知道刚刚发生了重启
+            self.history.append({
+                "role": "user",
+                "content": "【系统事件】Aethel，系统刚刚经历了一次重启。你之前的所有记忆、历史和状态已完美恢复，请继续工作。"
+            })
 
         # 3. 启动后台任务
         asyncio.create_task(self.hippocampus.start())
         asyncio.create_task(self.limbic.start())
-
-        # 4. 注入启动信号
-        self.history.append({
-            "role": "user",
-            "content": f"系统启动完成。"
-        })
 
         while True:
             try:
@@ -467,9 +475,10 @@ class AutonomousAgent:
                 # 1. 如果中间件决定忽略 (OBSERVE/IGNORE) 且没有待处理事件 -> 跳过
                 # 2. 如果 event 为空，但之前可能有任务在进行 -> 继续
                 if event and not self._should_think_after_event:
+                    await self.save_state()  # 有事件但忽略时，保存历史
                     continue
 
-                await self._save_snapshot()
+                await self.save_state()
 
                 # --- B. 思考与决策阶段 (Thought) ---
 
@@ -737,6 +746,8 @@ class AutonomousAgent:
                                     "name": name,
                                     "content": error_msg
                                 })
+
+                await self.save_state()
 
             except Exception as e:
                 logger.error(f"S1 主循环异常: {e}", exc_info=True)

@@ -6,6 +6,7 @@ from typing import Literal, Optional
 
 import aiofiles
 
+from core.tool_manager.output_cache import ToolOutputCache
 from core.tool_manager.registry import register
 
 logger = logging.getLogger(__name__)
@@ -56,12 +57,13 @@ async def list_directory(path: str = ".", max_depth: int = 1) -> str:
 
 
 @register()
-async def read_file(path: str, start_line: int = 1, end_line: int = -1) -> str:
+async def read_file(path: str, purpose: str, start_line: int = 1, end_line: int = -1,) -> str:
     """
     [FileSystem] 读取文件内容。支持读取指定行范围。
 
     Args:
         path: 文件路径。
+        purpose: 你为什么要搜索这个？你想从结果中得出什么结论？
         start_line: 起始行号 (从1开始)。
         end_line: 结束行号 (-1 表示读到末尾)。
     """
@@ -82,7 +84,13 @@ async def read_file(path: str, start_line: int = 1, end_line: int = -1) -> str:
         end_idx = min(total_lines, end_line)
 
         content = "".join(lines[start_idx:end_idx])
-        return f"--- 文件: {path} (行 {start_line}-{end_idx}/{total_lines}) ---\n{content}"
+
+        receipt_id, refined, final_response = await ToolOutputCache.process_tool_output(
+            raw_content=f"--- 文件: {path} (行 {start_line}-{end_idx}/{total_lines}) ---\n{content}",
+            purpose=purpose
+        )
+
+        return final_response
     except Exception as e:
         return f"读取失败: {e}"
 

@@ -1,4 +1,4 @@
-# tools/memory.py
+# tools/System2/memory.py
 import logging
 
 from core.infrastructure.api_client import GenericAPIClient
@@ -6,22 +6,21 @@ from core.infrastructure.config_loader import get_config
 from core.infrastructure.database import Database
 from core.io.event_bus import EventBus
 from core.io.event_schema import Action
-from core.kernel.agent import AutonomousAgent
 from core.memory.schema import SemanticMemory
 from core.memory.vector_store import VectorStore
+from core.tool_manager.output_cache import ToolOutputCache
 from core.tool_manager.registry import register
 
-# 懒加载单例，避免循环导入问题
-_store = None
-
 logger = logging.getLogger(__name__)
+
+# 懒加载完整的记忆重型引擎
+_store = None
 
 
 def _get_store():
     global _store
     if not _store:
         cfg = get_config()
-        # 注意：这里新建实例用于工具调用，生产环境最好通过依赖注入传进来
         db = Database(cfg)
         client = GenericAPIClient(cfg)
         _store = VectorStore(db, client)
@@ -29,127 +28,129 @@ def _get_store():
 
 
 @register()
-async def remember_core_info(
+async def deep_hybrid_search(
+        query: str,
         puid: str,
-        key: str,
-        value: str,
-        event_bus: EventBus,
-) -> str:
-    """
-    [写入] 记住关于用户的核心信息 (Core Memory)。
-    用于记录用户的长期属性、偏好、关系等结构化信息。
-
-    Args:
-        puid: 用户唯一标识 (platform:user_id)
-        key: 信息的键名，建议格式 '类别:名称' (如 'basic:name')。
-        value: 具体内容。
-    """
-    store = _get_store()
-    await store.save_core_memory(puid, key, value)
-
-    event_bus.publish_action(Action(
-        action="broadcast_log",
-        params={"content": f"💾 已写入核心记忆: {key} = {value}"}
-    ))
-    return f"已记住: {key} 是 {value}"
-
-
-@register()
-async def remember_knowledge(content: str, event_bus: EventBus) -> str:
-    """
-    [写入] 记住一条通用的知识或事实 (Semantic Memory)。
-    适用于不随时间改变的知识。
-
-    Args:
-        content: 知识的具体内容。
-    """
-    store = _get_store()
-    await store.save_vector_memory(SemanticMemory(content=content), "admin_console")
-    return "已保存到知识库。"
-
-
-@register()
-async def update_knowledge_status(
-        content_query: str,
-        status: str,
+        purpose: str,
         event_bus: EventBus
 ) -> str:
     """
-    [更新] 更新某条知识或记忆的状态。
-    用于标记信息已过期、失效或已解决。
-    例如：用户说“电脑修好了”，你可以将“电脑坏了”的记忆标记为 'inactive'。
+    [读取] 启动三路深度混合检索 (Vector + FTS5 + Graph 1-hop)。
+    当你需要追溯很久以前的具体事件、报错信息、或需要详细的上下文来回答复杂问题时调用。
+    资源消耗较高，但能找回极其精准且带逻辑关系的历史记忆。
 
     Args:
-        content_query: 用于定位记忆的内容关键词 (例如 "电脑坏了")。
-        status: 新状态，可选值: 'active' (有效), 'inactive' (失效/已解决)。
-    """
-    store = _get_store()
-    # 假设用户是 admin_console
-    await store.update_memory_status(content_query, "admin_console", status)
-
-    return f"已将关于 '{content_query}' 的记忆状态更新为 {status}。"
-
-
-@register()
-async def recall_memory(
-        event_bus: EventBus,
-        query: str,
-        puid: str
-) -> str:
-    """
-    [读取] 主动搜索记忆库。
-    当你觉得之前聊过某事但不确定细节时使用。
-
-    Args:
-        query: 搜索关键词或问题。
-        puid: 用户唯一标识
+        query: 详细的搜索关键词或完整的自然语言问题。
+        puid: 用户唯一标识 (platform:user_id)
+        purpose: 你为什么要搜索这个？你想从结果中得出什么结论？
     """
     store = _get_store()
     results = await store.search_memory(query, puid)
 
     if not results:
-        return "未找到相关记忆。"
+        return f"深度检索完毕：未找到与 '{query}' 相关的历史记忆。"
 
     found = "\n".join(results)
     event_bus.publish_action(Action(
         action="broadcast_log",
-        params={"content": f"🔍 检索结果:\n{found}"}
+        params={"content": f"🧠 S2 深度检索结果:\n{found}"}
     ))
-    return f"找到以下记忆:\n{found}"
+
+    receipt_id, refined, final_response = await ToolOutputCache.process_tool_output(
+        raw_content=found,
+        purpose=purpose
+    )
+
+    return final_response
 
 
 @register()
-async def update_interest(
-        new_interest: str,
-        reason: str,
-        agent: AutonomousAgent
+async def explore_entity_graph(
+        entity_name: str,
+        puid: str,
+        purpose: str,
+        event_bus: EventBus
 ) -> str:
     """
-    [Self-Regulation] 修改自身的关注点（兴趣向量）。
-    当你发现当前的关注点（如“编程”）不再适用，或者你想探索新话题时，使用此工具。
-    这会直接影响你的注意力门控系统，使你对符合新兴趣的消息更敏感。
+    [探索] 主动展开实体关系图谱 (GraphRAG 2-hop)。
+    当你遇到一个眼熟但想不起来具体背景的专有名词、人名或项目名时，
+    调用此工具可以将其“祖宗十八代”的上下游逻辑关系网全部拉出。
 
     Args:
-        new_interest: 新的兴趣描述（自然语言）。
-        reason: 修改兴趣的原因。
+        entity_name: 要探索的核心实体名称 (必须简短，如 "Aethel", "Ubuntu", "GhostFrame")。
+        puid: 用户唯一标识
+        purpose: 你为什么要搜索这个？你想从结果中得出什么结论？
     """
-    if not new_interest or not new_interest.strip():
-        return "错误: new_interest 不能为空。"
+    store = _get_store()
+    # 强制进行图谱多跳检索
+    results = await store._search_graph_edges(query=entity_name, user_id=puid, limit=15)
 
-    try:
-        # 检查 Agent 是否具备 Attention 模块
-        if not hasattr(agent, "attention") or not hasattr(agent.attention, "update_interest"):
-            return "错误: 当前 Agent 内核不支持动态兴趣更新 (AttentionFilter 未初始化)。"
+    if not results:
+        return f"知识图谱中未发现关于实体 '{entity_name}' 的连接网络。"
 
-        # 调用 Agent 的 Attention Filter 进行更新
-        # 这会触发 Embedding API 调用并更新数据库中的 preference_store
-        await agent.attention.update_interest(new_interest)
+    graph_lines = [item['content'] for item in results]
+    found = "\n".join(graph_lines)
 
-        # 记录日志
-        logger.info(f"🔄 [Self-Regulation] 兴趣已更新: {new_interest} (Reason: {reason})")
+    event_bus.publish_action(Action(
+        action="broadcast_log",
+        params={"content": f"🕸️ 展开 [{entity_name}] 关系网:\n{found}"}
+    ))
 
-        return f"成功: 你的关注点已更新为 '{new_interest}'。现在的你会对相关话题更感兴趣。"
+    receipt_id, refined, final_response = await ToolOutputCache.process_tool_output(
+        raw_content=f"关于 '{entity_name}' 的逻辑关联如下:\n{found}",
+        purpose=purpose
+    )
 
-    except Exception as e:
-        logger.error(f"更新兴趣失败: {e}", exc_info=True)
-        return f"系统错误: 更新兴趣失败 - {str(e)}"
+    return final_response
+
+
+@register()
+async def memorize_absolute_fact(
+        content: str,
+        puid: str,
+        event_bus: EventBus
+) -> str:
+    """
+    [写入] 强制刻印客观事实 (Semantic Memory)。
+    跳过夜间的睡眠提取，由你(S2)直接向知识库写入不可篡改的客观真理或重要规则。
+    适用于你通过代码执行、文件读取后得出的关键结论（如服务器IP、重要密码指引）。
+
+    Args:
+        content: 事实的具体内容 (必须是自包含的完整陈述)。
+        puid: 用户唯一标识 (如果是通用知识，可传入 'global')
+    """
+    store = _get_store()
+    await store.save_vector_memory(SemanticMemory(content=content), puid)
+    return "✅ 客观事实已成功刻印至深层知识库。"
+
+
+@register()
+async def correct_cognitive_error(
+        conflict_query: str,
+        correct_fact: str,
+        puid: str,
+        event_bus: EventBus
+) -> str:
+    """
+    [纠错] 主动修正认知矛盾与错误记忆。
+    当你在推理时发现历史记忆互相矛盾（如以前记录“没修好”，现在确信“已修好”），
+    调用此工具可以废弃旧有的错误记忆，并覆写正确的新事实。
+
+    Args:
+        conflict_query: 用于定位那条错误记忆的模糊关键词 (例如 "网络没修好")。
+        correct_fact: 应当被记住的正确事实 (例如 "网络问题已在3月7日修好")。
+        puid: 用户唯一标识
+    """
+    store = _get_store()
+
+    # 1. 使旧记忆失效
+    await store.update_memory_status(conflict_query, puid, "inactive")
+
+    # 2. 写入新记忆
+    await store.save_vector_memory(SemanticMemory(content=correct_fact), puid)
+
+    event_bus.publish_action(Action(
+        action="broadcast_log",
+        params={"content": f"🛠️ 认知纠偏: 废弃了关于 '{conflict_query}' 的旧知，更新为: {correct_fact}"}
+    ))
+    return f"认知纠偏完成。关于 '{conflict_query}' 的旧记忆已被废弃，新事实已建立。"

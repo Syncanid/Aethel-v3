@@ -8,6 +8,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from core.infrastructure.config_loader import Config
+from core.tool_manager.output_cache import ToolOutputCache
 from core.tool_manager.registry import register
 
 logger = logging.getLogger(__name__)
@@ -72,13 +73,17 @@ async def web_search(
 
 
 @register()
-async def browse_website(url: str) -> str:
+async def browse_website(
+        url: str,
+        purpose: str,
+) -> str:
     """
     [Network] 访问指定 URL 并提取网页正文内容。
     用于深入阅读搜索结果中的网页。
 
     Args:
         url: 目标网页地址。
+        purpose: 你为什么要搜索这个？你想从结果中得出什么结论？
     """
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
@@ -102,7 +107,12 @@ async def browse_website(url: str) -> str:
             lines = [line.strip() for line in text.splitlines() if line.strip()]
             cleaned_text = '\n'.join(lines)
 
-            return f"=== 网页内容: {url} ===\n{cleaned_text[:5000]}"  # 限制长度防止爆 Token
+            receipt_id, refined, final_response = await ToolOutputCache.process_tool_output(
+                raw_content=f"=== 网页内容: {url} ===\n{cleaned_text}",
+                purpose=purpose
+            )
+
+            return final_response
 
     except Exception as e:
         return f"无法访问网页 {url}: {e}"
@@ -142,7 +152,7 @@ async def send_http_request(
             try:
                 result += f"Body: {json.dumps(resp.json(), indent=2, ensure_ascii=False)}"
             except:
-                result += f"Body: {resp.text[:2000]}"
+                result += f"Body: {resp.text}"
             return result
     except Exception as e:
         return f"HTTP 请求失败: {e}"

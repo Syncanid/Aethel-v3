@@ -2,8 +2,10 @@
 import asyncio
 import datetime
 import difflib
+import json
 import logging
 import math
+import re
 import time
 import uuid
 from typing import List, Dict, Union, Any
@@ -199,44 +201,204 @@ class VectorStore:
         except Exception as e:
             logger.error(f"向量存储失败: {e}", exc_info=True)
 
-    def _rrf_merge(self, list_a: List[Dict], list_b: List[Dict], k: int = 60) -> List[Dict]:
+    def _rrf_merge(self, result_lists: List[List[Dict]], k: int = 60) -> List[Dict]:
         """
-        Reciprocal Rank Fusion (RRF) 算法
-        将两路检索结果合并，分数公式: score = 1 / (k + rank)
+        多路 RRF 融合算法
         """
         scores = {}
         content_map = {}
 
-        # 处理列表 A (向量结果 - 优先，因为它带有 Metadata)
-        for rank, item in enumerate(list_a):
-            doc_id = item['id']
-            scores[doc_id] = scores.get(doc_id, 0) + 1.0 / (k + rank)
-            content_map[doc_id] = item
+        for res_list in result_lists:
+            for rank, item in enumerate(res_list):
+                doc_id = item['id']
+                # 计算 RRF 分数
+                scores[doc_id] = scores.get(doc_id, 0) + 1.0 / (k + rank)
 
-        # 处理列表 B (文本结果)
-        for rank, item in enumerate(list_b):
-            doc_id = item['id']
-            scores[doc_id] = scores.get(doc_id, 0) + 1.0 / (k + rank)
-            # 只有当该 ID 不在 map 中时才添加 (优先保留向量检索返回的完整对象)
-            if doc_id not in content_map:
-                content_map[doc_id] = item
+                # 合并内容与元数据 (保留信息最全的那一份)
+                if doc_id not in content_map or item.get('type') == 'vector':
+                    content_map[doc_id] = item
+
+                # 如果是图谱拉出的关联数据，给予额外的权重加成
+                if item.get('type') == 'graph':
+                    scores[doc_id] *= 1.2
 
         # 按分数降序排列
         sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
-        return [content_map[doc_id] for doc_id in sorted_ids]
+
+        final_results = []
+        for doc_id in sorted_ids:
+            item = content_map[doc_id]
+            item["rrf_score"] = scores[doc_id]
+            final_results.append(item)
+
+        return final_results
+
+    async def _extract_entities_with_llm(self, query: str) -> List[str]:
+        """
+        使用 LLM 精准提取查询实体。
+        """
+        system_prompt = "你是一个实体提取引擎。请提取用户查询中的核心专有名词、项目名或关键事物。"
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "entities": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "核心实体列表"
+                }
+            },
+            "required": ["entities"],
+            "additionalProperties": False
+        }
+
+        try:
+            # 优先使用配置的 small_model (如果未配置则回退到主模型)，加快提取速度
+            message = await self.api_client.create_chat_completion_once(
+                messages=f"提取实体：{query}",
+                system_prompt=system_prompt,
+                model=self.api_client.model,
+                schema=schema
+            )
+
+            content = message.get("content", "").strip()
+            if "<think>" in content and "</think>" in content:
+                content = content.split("</think>")[-1].strip()
+
+            # 解析 JSON
+            data = json.loads(content)
+            return data.get("entities", [])
+
+        except Exception as e:
+            logger.warning(f"LLM 实体提取失败，回退到正则切词: {e}")
+            # 降级方案：保留现有的正则逻辑作为兜底
+            return re.findall(r'[a-zA-Z0-9_]+|[\u4e00-\u9fa5]{2,}', query)
+
+    async def _search_graph_edges(self, query: str, user_id: str, limit: int = 5) -> List[Dict]:
+        """
+        2-Hop 知识图谱子图检索引擎 (GraphRAG)
+        提取实体 -> 命中种子节点 (Hop 1) -> 扩展邻居节点 (Hop 2) -> 距离衰减打分
+        """
+        graph_results = []
+
+        # 1. 智能实体提取
+        keywords = await self._extract_entities_with_llm(query)
+        if not keywords: return []
+
+        async with self.db.get_connection() as conn:
+            # ==========================================
+            # Hop 1: 寻找种子边 (直接命中关键词的核心实体)
+            # ==========================================
+            hop1_edges = {}
+            seed_entities = set()
+
+            # 动态构造 LIKE 条件
+            conditions = []
+            params_hop1 = [user_id]
+            for kw in keywords:
+                conditions.append("(source LIKE ? OR target LIKE ?)")
+                params_hop1.extend([f"%{kw}%", f"%{kw}%"])
+
+            where_clause = " OR ".join(conditions)
+            sql_hop1 = f"""
+                SELECT id, source, target, relation, context, weight 
+                FROM graph_edges 
+                WHERE puid = ? AND ({where_clause})
+                ORDER BY weight DESC LIMIT ?
+            """
+            params_hop1.append(limit)  # 追加 LIMIT 参数
+
+            cursor = await conn.execute(sql_hop1, params_hop1)
+            rows = await cursor.fetchall()
+
+            for r in rows:
+                edge_id, source, target, relation, context, weight = r
+                hop1_edges[edge_id] = {
+                    "source": source, "target": target, "relation": relation,
+                    "context": context, "weight": weight, "hop": 1
+                }
+
+                # 找出到底是哪个实体被命中了，将其作为 Hop 2 的扩散种子
+                for kw in keywords:
+                    if kw.lower() in source.lower(): seed_entities.add(source)
+                    if kw.lower() in target.lower(): seed_entities.add(target)
+
+            # ==========================================
+            # Hop 2: 关系延展 (寻找种子实体的关联邻居)
+            # ==========================================
+            hop2_edges = {}
+            if seed_entities:
+                for seed in seed_entities:
+                    # 查询该实体的“节点度数”（有多少条边连着它）
+                    cursor = await conn.execute(
+                        "SELECT COUNT(*) FROM graph_edges WHERE puid=? AND (source=? OR target=?)",
+                        (user_id, seed, seed)
+                    )
+                    degree = (await cursor.fetchone())[0]
+
+                    # 动态衰减：如果一个节点连着上百条边，说明它是废话节点（比如"我"），惩罚它
+                    decay_factor = 0.5 * (1.0 / (1.0 + max(0, degree - 10) * 0.1))
+
+                    # 如果惩罚太高，直接抛弃，防止爆炸
+                    if decay_factor < 0.05: continue
+
+                    sql_hop2 = """
+                               SELECT id, source, target, relation, context, weight
+                               FROM graph_edges
+                               WHERE puid = ?
+                                 AND (source = ? OR target = ?)
+                               ORDER BY weight DESC LIMIT ? \
+                               """
+                    cursor = await conn.execute(sql_hop2, (user_id, seed, seed, 5))
+                    rows2 = await cursor.fetchall()
+
+                    for r in rows2:
+                        edge_id, src, tgt, rel, ctx, w = r
+                        if edge_id not in hop1_edges:
+                            hop2_edges[edge_id] = {
+                                "source": src, "target": tgt, "relation": rel,
+                                "context": ctx, "weight": w * decay_factor, "hop": 2
+                            }
+
+            # ==========================================
+            # 整合与格式化输出
+            # ==========================================
+            all_edges = {**hop1_edges, **hop2_edges}
+
+            # 按照衰减后的权重倒序排列，截取前 limit 条
+            sorted_edges = sorted(all_edges.items(), key=lambda x: x[1]["weight"], reverse=True)[:limit]
+
+            for edge_id, data in sorted_edges:
+                # 构建高度结构化的语义字符串供 LLM 吸收
+                content = f"[{data['source']}] --({data['relation']})--> [{data['target']}]"
+                if data['context']:
+                    content += f" (补充事实: {data['context']})"
+
+                graph_results.append({
+                    "id": f"graph_{edge_id}",
+                    "content": content,
+                    "metadata": {
+                        "type": "graph",
+                        "source": data['source'],
+                        "target": data['target'],
+                        "hop": data['hop']
+                    },
+                    "type": "graph"
+                })
+
+        return graph_results
 
     async def search_memory(self, query: str, user_id: str, current_state: NeuroState = None, limit: int = 5) -> List[
         str]:
         """
-        情绪依存的混合检索: 向量检索 + 关键词检索(SQL LIKE) -> RRF 融合
+        情绪依存的混合检索: Vector + FTS5 + Graph -> RRF -> Emotion Rerank
         """
-
-        # 1. 向量检索 (Vector Search) - 擅长语意模糊匹配
+        # 路一：向量检索 (ChromaDB - 擅长语意模糊匹配)
         vector_results = []
         query_vec = await self.api_client.create_embedding(query)
         if query_vec:
             for coll in [self.episodic_coll, self.semantic_coll]:
-                res = coll.query(query_embeddings=[query_vec], n_results=limit * 3, where={"user_id": user_id})
+                res = coll.query(query_embeddings=[query_vec], n_results=limit * 2, where={"user_id": user_id})
                 if res['ids']:
                     for i, doc_id in enumerate(res['ids'][0]):
                         vector_results.append({
@@ -246,29 +408,40 @@ class VectorStore:
                             "type": "vector"
                         })
 
-        # 2. 文本检索 (Text Search) - 擅长精确匹配 (ID, 错误码, 专有名词)
+        # 路二：全文检索 (SQLite FTS5 BM25 - 擅长精准关键词匹配)
         text_results = []
         async with self.db.get_connection() as conn:
-            # 使用 LIKE 进行包含匹配
-            sql = "SELECT doc_id, content, type FROM text_search_index WHERE puid=? AND content LIKE ? LIMIT ?"
-            cursor = await conn.execute(sql, (user_id, f"%{query}%", limit * 2))
-            rows = await cursor.fetchall()
-            for r in rows:
-                text_results.append({
-                    "id": r[0],
-                    "content": r[1],
-                    "metadata": {},  # 文本检索可能丢失 metadata，RRF 阶段会尝试互补
-                    "type": "text"
-                })
+            sql = """
+                  SELECT doc_id, content, type
+                  FROM memory_fts
+                  WHERE memory_fts MATCH ?
+                    AND puid = ?
+                  ORDER BY bm25(memory_fts) LIMIT ? \
+                  """
+            try:
+                # FTS5 的 MATCH 语法需要处理特殊字符，这里做简单转义
+                safe_query = query.replace('"', '""').replace("'", "''")
+                cursor = await conn.execute(sql, (f'"{safe_query}"', user_id, limit * 2))
+                rows = await cursor.fetchall()
+                for r in rows:
+                    text_results.append({
+                        "id": r[0], "content": r[1], "metadata": {"type": r[2]}, "type": "text"
+                    })
+            except Exception as e:
+                logger.warning(f"FTS5 检索解析跳过 (可能是查询不含明确词汇): {e}")
 
-        # 2. RRF 初步融合
-        merged_results = self._rrf_merge(vector_results, text_results)
+        # 路三：图谱检索 (1-hop 逻辑关系扩展)
+        graph_results = await self._search_graph_edges(query, user_id, limit)
 
-        # 3. 情绪维度重排
+        # 融合：三路 RRF
+        merged_results = self._rrf_merge([vector_results, text_results, graph_results])
+
+        # 情绪维度重排 (保留原有优秀逻辑)
         if current_state and merged_results:
             def calculate_emotion_distance(item):
                 meta = item.get("metadata", {})
-                if not meta: return 1.0  # 没有情绪元数据的，给最大距离惩罚
+                if not meta or item.get("type") == "graph":
+                    return 0.5  # 图谱客观事实给中等距离，不严厉惩罚
 
                 # 计算欧几里得距离: 当前情绪与记忆编码时情绪的距离
                 dop_diff = current_state.dopamine - meta.get("emotion_dopamine", 0.5)
@@ -281,11 +454,11 @@ class VectorStore:
             # 情绪状态越接近，惩罚越小，排名越靠前
             for item in merged_results:
                 emo_dist = calculate_emotion_distance(item)
-                item["final_score"] = item.get("rrf_score", 1.0) - (emo_dist * 0.5)  # 0.5为情绪权重
+                item["final_score"] = item.get("rrf_score", 1.0) - (emo_dist * 0.3)
 
             merged_results.sort(key=lambda x: x.get("final_score", 0), reverse=True)
 
-        # 4. 格式化输出与访问标记
+        # 格式化输出
         final_output = []
 
         # 优先添加 Core Memory (置顶)
@@ -295,21 +468,18 @@ class VectorStore:
                 final_output.append(f"[核心档案] {k}: {v}")
 
         for item in merged_results[:limit]:
-            # 触发异步访问标记，为记忆再巩固做准备
-            if item.get("id"):
-                asyncio.create_task(
-                    self.mark_memory_accessed(item["id"], item.get("metadata", {}).get("type", "episodic")))
-
-            if item.get('metadata'):
+            if str(item.get("id")).startswith("graph_"):
+                final_output.append(f"[逻辑图谱] {item['content']}")
+            elif item.get('metadata') and 'created_at' in item['metadata']:
                 formatted = self._format_memory_content(item['content'], item['metadata'])
-                tag = "情景" if "episodic" in str(item.get('metadata', '')) else "知识"  # 简易判断
-                # 覆盖 tag
-                formatted = formatted.replace("] ", f" | {tag}] ", 1)  # 插入类型标签
-            else:
-                # 纯文本回退格式
-                formatted = f"[精确匹配] {item['content']}"
+                tag = "情景" if "episodic" in str(item.get('metadata', '')) else "知识"
+                formatted = formatted.replace("] ", f" | {tag}] ", 1)
+                final_output.append(formatted)
 
-            final_output.append(formatted)
+                # 触发异步巩固
+                asyncio.create_task(self.mark_memory_accessed(item["id"], item["metadata"].get("type", "episodic")))
+            else:
+                final_output.append(f"[精确匹配] {item['content']}")
 
         return final_output
 

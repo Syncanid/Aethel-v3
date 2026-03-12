@@ -110,7 +110,80 @@ SCHEMA_SQL = {
                             updated_at
                             REAL
                         )
-                        """
+                        """,
+    "graph_edges": """
+                   CREATE TABLE IF NOT EXISTS graph_edges
+                   (
+                       id
+                       INTEGER
+                       PRIMARY
+                       KEY
+                       AUTOINCREMENT,
+                       source
+                       TEXT
+                       NOT
+                       NULL,
+                       target
+                       TEXT
+                       NOT
+                       NULL,
+                       relation
+                       TEXT
+                       NOT
+                       NULL,
+                       context
+                       TEXT,
+                       puid
+                       TEXT
+                       NOT
+                       NULL,
+                       weight
+                       REAL
+                       DEFAULT
+                       1.0,
+                       timestamp
+                       REAL
+                   )
+                   """,
+    "memory_fts": """
+        CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+            doc_id UNINDEXED, -- 仅存储不建立索引
+            content,
+            type UNINDEXED,
+            puid UNINDEXED
+        )
+    """,
+    "trigger_fts_insert": """
+                          CREATE TRIGGER IF NOT EXISTS tsi_after_insert 
+        AFTER INSERT ON text_search_index
+                          BEGIN
+                          INSERT INTO memory_fts(doc_id, content, type, puid)
+                          VALUES (new.doc_id, new.content, new.type, new.puid);
+                          END;
+                          """,
+    "trigger_fts_delete": """
+                          CREATE TRIGGER IF NOT EXISTS tsi_after_delete 
+        AFTER
+                          DELETE
+                          ON text_search_index
+                          BEGIN
+                          DELETE
+                          FROM memory_fts
+                          WHERE doc_id = old.doc_id;
+                          END;
+                          """,
+    "trigger_fts_update": """
+                          CREATE TRIGGER IF NOT EXISTS tsi_after_update 
+        AFTER
+                          UPDATE ON text_search_index
+                          BEGIN
+                          DELETE
+                          FROM memory_fts
+                          WHERE doc_id = old.doc_id;
+                          INSERT INTO memory_fts(doc_id, content, type, puid)
+                          VALUES (new.doc_id, new.content, new.type, new.puid);
+                          END;
+                          """
 }
 
 
