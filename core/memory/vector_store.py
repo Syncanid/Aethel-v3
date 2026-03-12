@@ -1,13 +1,16 @@
 # core/memory/vector_store.py
+import asyncio
 import datetime
 import difflib
 import logging
+import math
 import time
 import uuid
 from typing import List, Dict, Union, Any
 
 from core.infrastructure.api_client import GenericAPIClient
 from core.infrastructure.database import Database
+from core.limbic.arch import NeuroState
 from core.memory.schema import EpisodicMemory, SemanticMemory
 
 logger = logging.getLogger(__name__)
@@ -222,9 +225,10 @@ class VectorStore:
         sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
         return [content_map[doc_id] for doc_id in sorted_ids]
 
-    async def search_memory(self, query: str, user_id: str, limit: int = 5) -> List[str]:
+    async def search_memory(self, query: str, user_id: str, current_state: NeuroState = None, limit: int = 5) -> List[
+        str]:
         """
-        混合检索 (Hybrid Search): 向量检索 + 关键词检索(SQL LIKE) -> RRF 融合
+        情绪依存的混合检索: 向量检索 + 关键词检索(SQL LIKE) -> RRF 融合
         """
 
         # 1. 向量检索 (Vector Search) - 擅长语意模糊匹配
@@ -232,7 +236,7 @@ class VectorStore:
         query_vec = await self.api_client.create_embedding(query)
         if query_vec:
             for coll in [self.episodic_coll, self.semantic_coll]:
-                res = coll.query(query_embeddings=[query_vec], n_results=limit * 2, where={"user_id": user_id})
+                res = coll.query(query_embeddings=[query_vec], n_results=limit * 3, where={"user_id": user_id})
                 if res['ids']:
                     for i, doc_id in enumerate(res['ids'][0]):
                         vector_results.append({
@@ -257,10 +261,31 @@ class VectorStore:
                     "type": "text"
                 })
 
-        # 3. 结果融合 (Fusion)
+        # 2. RRF 初步融合
         merged_results = self._rrf_merge(vector_results, text_results)
 
-        # 4. 格式化输出
+        # 3. 情绪维度重排
+        if current_state and merged_results:
+            def calculate_emotion_distance(item):
+                meta = item.get("metadata", {})
+                if not meta: return 1.0  # 没有情绪元数据的，给最大距离惩罚
+
+                # 计算欧几里得距离: 当前情绪与记忆编码时情绪的距离
+                dop_diff = current_state.dopamine - meta.get("emotion_dopamine", 0.5)
+                cor_diff = current_state.cortisol - meta.get("emotion_cortisol", 0.5)
+                ser_diff = current_state.serotonin - meta.get("emotion_serotonin", 0.5)
+
+                return math.sqrt(dop_diff ** 2 + cor_diff ** 2 + ser_diff ** 2)
+
+            # 综合得分 = 原RRF排名分数 - 情绪距离惩罚
+            # 情绪状态越接近，惩罚越小，排名越靠前
+            for item in merged_results:
+                emo_dist = calculate_emotion_distance(item)
+                item["final_score"] = item.get("rrf_score", 1.0) - (emo_dist * 0.5)  # 0.5为情绪权重
+
+            merged_results.sort(key=lambda x: x.get("final_score", 0), reverse=True)
+
+        # 4. 格式化输出与访问标记
         final_output = []
 
         # 优先添加 Core Memory (置顶)
@@ -270,7 +295,11 @@ class VectorStore:
                 final_output.append(f"[核心档案] {k}: {v}")
 
         for item in merged_results[:limit]:
-            # 如果有 metadata 则使用高级格式化 (显示时间)
+            # 触发异步访问标记，为记忆再巩固做准备
+            if item.get("id"):
+                asyncio.create_task(
+                    self.mark_memory_accessed(item["id"], item.get("metadata", {}).get("type", "episodic")))
+
             if item.get('metadata'):
                 formatted = self._format_memory_content(item['content'], item['metadata'])
                 tag = "情景" if "episodic" in str(item.get('metadata', '')) else "知识"  # 简易判断
@@ -283,6 +312,23 @@ class VectorStore:
             final_output.append(formatted)
 
         return final_output
+
+    async def mark_memory_accessed(self, memory_id: str, mem_type: str):
+        """增加记忆访问计数，用于触发再巩固"""
+        try:
+            coll = self.episodic_coll if mem_type == "episodic" else self.semantic_coll
+            res = coll.get(ids=[memory_id])
+            if res['ids']:
+                meta = res['metadatas'][0]
+                meta["access_count"] = meta.get("access_count", 0) + 1
+                meta["last_accessed"] = time.time()
+                coll.update(ids=[memory_id], metadatas=[meta])
+
+                # 若回忆次数超过阈值，向 EventBus 广播 RECONSOLIDATION 事件（可由 Agent 拦截）
+                if meta["access_count"] % 3 == 0:
+                    logger.info(f"记忆 [{memory_id}] 被频繁回忆，准备触发再巩固。")
+        except Exception as e:
+            logger.error(f"标记记忆访问失败: {e}")
 
     async def update_memory_status(self, content_query: str, user_id: str, new_status: str):
         """

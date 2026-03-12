@@ -69,12 +69,12 @@ class AutonomousAgent:
             agent_state=self.scratchpad
         )
 
-        # 初始化记忆组件
-        self.hippocampus = Hippocampus(config, self.api_client, database, self.history)
-        self.vector_store = VectorStore(database, self.api_client)
-
         # 初始化边缘系统
         self.limbic = LimbicManager(config, database, event_bus, self.api_client)
+
+        # 初始化记忆组件
+        self.hippocampus = Hippocampus(config, self.limbic, self.api_client, database, self.history)
+        self.vector_store = VectorStore(database, self.api_client)
 
         # 初始化用户管理器
         self.user_manager = UserManager(database)
@@ -108,6 +108,8 @@ class AutonomousAgent:
         # 临时状态：当前事件的反应决定
         self._current_reaction: Optional[ReactionType] = None
         self._should_think_after_event: bool = False
+
+        self.current_tokens = 0
 
     def _setup_middlewares(self):
         """注册中间件链"""
@@ -400,10 +402,13 @@ class AutonomousAgent:
         # 获取初始生理状态
         initial_state = await self.limbic.get_state()
 
+        embodiment_narrative = await self.limbic.embodiment.get_status_narrative()
+
         # 生成完整 Prompt
         system_prompt = self.prompt_manager.get_system_prompt(
             neuro_state=initial_state,
-            interest_context=initial_interest
+            interest_context=initial_interest,
+            embodiment_narrative=embodiment_narrative,
         )
         self.history.append({"role": "system", "content": system_prompt})
 
@@ -470,10 +475,12 @@ class AutonomousAgent:
 
                 # 上下文压缩与修剪
                 await self.context_manager.compress_if_needed(self.history)
-                self._prune_context()
+                self.current_tokens = self._prune_context()
+                self.limbic.embodiment.context_usage_percent = (
+                        self.current_tokens / self.config.get("llm.model_context", 16384))
 
                 # 主动记忆检索 (RAG)
-                # retrieved_memories = await self._active_retrieval()
+                retrieved_memories = await self._active_retrieval()
 
                 # 动态生成 System Prompt
                 # 1. 获取当前神经状态
@@ -481,12 +488,15 @@ class AutonomousAgent:
                 current_interactor = self.scratchpad.get("current_interactor")
                 current_interest = await self.attention.get_current_interest_text()
 
+                embodiment_narrative = await self.limbic.embodiment.get_status_narrative()
+
                 # 2. 生成带有状态描述的 Prompt
                 system_prompt_base = self.prompt_manager.get_system_prompt(
                     neuro_state=current_neuro_state,
-                    # memory_context=retrieved_memories,
+                    memory_context=retrieved_memories,
                     social_context=current_interactor,
-                    interest_context=current_interest
+                    interest_context=current_interest,
+                    embodiment_narrative=embodiment_narrative
                 )
 
                 # 读取 TaskRegistry

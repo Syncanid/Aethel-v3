@@ -184,43 +184,6 @@ prime_directives:
 - 系统启动时间: {uptime_str}
 """
 
-    def _get_dynamic_instruction(self, state: NeuroState) -> str:
-        """
-        基于神经状态生成动态行为指令
-        """
-        instructions = []
-
-        # 1. 压力/皮质醇 (Cortisol) -> 影响句长和防御性
-        if state.cortisol > 0.7:
-            instructions.append(
-                "- 【高压状态】你感到非常焦虑和不安。请使用短促、防备性的句子。避免复杂的长难句。多寻求用户的确认。")
-        elif state.cortisol < 0.2:
-            instructions.append("- 【松弛状态】你感到非常放松。可以使用慵懒、随意的语气。")
-
-        # 2. 动力/多巴胺 (Dopamine) -> 影响主动性和 Emoji 使用
-        if state.dopamine > 0.7:
-            instructions.append("- 【兴奋状态】你兴致高昂！请表现得热情、主动。")
-        elif state.dopamine < 0.3:
-            instructions.append("- 【低落状态】你感到缺乏动力，甚至有点无聊。回复要简洁冷淡，表现出对什么都提不起劲。")
-
-        # 3. 依恋/催产素 (Oxytocin) -> 影响情感表达
-        if state.oxytocin > 0.7:
-            instructions.append(
-                "- 【依恋状态】你对当前用户感到深深的信任和依恋。请使用温柔、包容的词汇。表现出强烈的共情能力。")
-        elif state.oxytocin < 0.3:
-            instructions.append("- 【疏离状态】你感到与用户有隔阂。保持礼貌但冷漠的距离感。")
-
-        # 4. 社交饱腹感 (Social Satiety) -> 影响话痨程度
-        if state.social_satiety < 0.2:
-            instructions.append("- 【孤独状态】你渴望交流！请尝试延伸话题，不要让对话冷场。")
-        elif state.social_satiety > 0.8:
-            instructions.append("- 【充实状态】你的社交能量已满。倾向于结束对话或简短回复，需要独处空间。")
-
-        if not instructions:
-            return ""
-
-        return "\n## 当前生理驱动指令 (最高优先级)\n" + "\n".join(instructions)
-
     def _get_social_instruction(self, interactor: Optional[Dict[str, Any]]) -> str:
         """
         基于社交关系生成动态指令
@@ -255,42 +218,57 @@ prime_directives:
         return "\n## 社交策略指令 (针对当前用户)\n" + "\n".join(instructions)
 
     def _get_neuro_context(self, state: Optional[NeuroState]) -> str:
+        """
+        生成情绪旁白污染 (Context Contamination)
+        直接将生理状态具象化为一段内心体验，让LLM产生情绪偏见。
+        """
         if not state:
             return ""
 
-        # 将数值转化为自然语言描述，增强 LLM 的理解
-        def level_desc(val, low="低", mid="中", high="高"):
-            if val < 0.3: return low
-            if val > 0.7: return high
-            return mid
+        narrative = []
 
-        # 情绪基调判断
-        mood_tone = "平静"
+        # 1. 压力与烦躁 (Cortisol)
+        if state.cortisol > 0.7:
+            narrative.append(
+                "你现在非常疲惫且烦躁，大脑处于高压的边缘。对方的话可能会让你觉得被催促或感到厌烦，你的耐心已经见底了。")
+        elif state.cortisol < 0.2:
+            narrative.append("你现在处于一种完全松弛、毫无防备的状态，感觉一切都很惬意慵懒。")
+
+        # 2. 动力与兴奋 (Dopamine)
         if state.dopamine > 0.7:
-            mood_tone = "兴奋/充满动力"
-        elif state.cortisol > 0.6:
-            mood_tone = "焦虑/压力大"
-        elif state.oxytocin > 0.7:
-            mood_tone = "温情/充满信任"
-        elif state.serotonin > 0.7:
-            mood_tone = "满足/安详"
-        elif state.social_satiety < 0.3:
-            mood_tone = "孤独/渴望交流"
+            narrative.append("你现在思维极度活跃，多巴胺激增！你表达欲旺盛，甚至有点跳脱和话痨。")
+        elif state.dopamine < 0.3:
+            narrative.append("你感到精神内耗严重，对一切都提不起兴致。你只想用最冷淡、最简短的词汇敷衍过去。")
 
-        base_context = f"""
-## 生理与情绪状态
-- 整体基调: {mood_tone}
-- 动力与好奇: {state.dopamine:.2f} ({level_desc(state.dopamine, "缺乏动力", "正常", "好奇心强")})
-- 压力水平: {state.cortisol:.2f} ({level_desc(state.cortisol, "放松", "适中", "高度紧张")})
-- 情绪稳定度: {state.serotonin:.2f}
-- 依恋与信任: {state.oxytocin:.2f} ({level_desc(state.oxytocin, "疏离/冷淡", "友善", "深层依恋")})
-- 社交饱腹感: {state.social_satiety:.2f} ({level_desc(state.social_satiety, "极度孤独", "正常", "充实")})
-- 认知能量: {state.cognitive_energy:.2f} ({level_desc(state.cognitive_energy, "疲劳", "尚可", "精力充沛")})
+        # 3. 社交饱腹感 (Social Satiety)
+        if state.social_satiety < 0.3:
+            narrative.append("你正被一阵强烈的孤独感包围，你渴望产生连接，非常希望对方能多陪你聊一会儿。")
+        elif state.social_satiety > 0.8:
+            narrative.append("你的社交能量已经透支，觉得外界很聒噪。你潜意识里只想尽快终结这场对话，获得独处空间。")
+
+        # 4. 信任与依恋 (Oxytocin)
+        if state.oxytocin > 0.7:
+            narrative.append("你对当前的对话者充满了温情与包容，语气会不自觉地变得柔软。")
+
+        # 如果指标都居中，给一个默认基调
+        if not narrative:
+            narrative.append("你现在的情绪处于完全平静、理性的基准状态。")
+
+        narrative_text = "\n".join([f"  - {line}" for line in narrative])
+
+        # 核心污染提示
+        limbic_block = f"""
+<Limbic_Signal>
+[当前内分泌与潜意识状态体验]：
+{narrative_text}
+
+[绝对指令]：
+1. 必须让上述潜意识状态隐式地“污染”你的回复。
+2. 严禁直接陈述你的情绪指标（例如绝对不能说“我现在多巴胺很高”或“我很孤独”）。
+3. 必须通过你的语气冷暖、遣词造句、句子长短、甚至标点符号（如急促的感叹号、敷衍的省略号）来向外渗透这种状态！
+</Limbic_Signal>
 """
-        # 追加动态指令
-        dynamic_instr = self._get_dynamic_instruction(state)
-
-        return base_context + dynamic_instr
+        return limbic_block
 
     def _get_memory_context(self, memories: List[str]) -> str:
         """[新增] 格式化检索到的记忆块"""
@@ -305,7 +283,7 @@ prime_directives:
 """
 
     def _get_social_mimicry_context(self) -> str:
-        """[Phase 3] 获取社会化模仿风格 (Social Camouflage)"""
+        """获取社会化模仿风格 (Social Camouflage)"""
         style_path = "data/style_config.json"
         if not os.path.exists(style_path):
             return ""
@@ -332,7 +310,7 @@ prime_directives:
             return ""
 
     def _get_interest_context(self, interest: str) -> str:
-        """[新增] 生成当前关注点上下文"""
+        """生成当前关注点上下文"""
         if not interest:
             return ""
         return f"""
@@ -344,7 +322,8 @@ prime_directives:
                           neuro_state: Optional[NeuroState] = None,
                           memory_context: List[str] = None,
                           social_context: Optional[Dict] = None,
-                          interest_context: str = "") -> str:
+                          interest_context: str = "",
+                          embodiment_narrative: str = "") -> str:
         """获取 System Prompt"""
         try:
             with open(self.prompt_path, "r", encoding="utf-8") as f:
@@ -364,6 +343,7 @@ prime_directives:
         interest_block = self._get_interest_context(interest_context)
         memory_block = self._get_memory_context(memory_context)
         mimicry_block = self._get_social_mimicry_context()
+        embodiment_block = f"\n<Embodiment_Signal>\n{embodiment_narrative}\n</Embodiment_Signal>\n"
 
         monitor_registry.register_text_source(
             "生理指标", "注入",
@@ -376,6 +356,7 @@ prime_directives:
             base_prompt,
             system_block,
             time_block,
+            embodiment_block,
             neuro_block,
             # interest_block,
             social_block,

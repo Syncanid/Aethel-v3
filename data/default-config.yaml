@@ -1,5 +1,8 @@
 system:
-  log_level: "DEBUG"
+  log_level: "INFO"
+
+  # 是否启用硬件资源绑定 (CPU/内存/磁盘影响情绪)
+  limbic_embodiment: true
 
   # IO 连接设置 (预留)
   onebot_url: "ws://127.0.0.1:3001"

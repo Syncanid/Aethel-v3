@@ -14,6 +14,7 @@ from core.io.event_schema import OneBotEvent, EventSource, EventType, DetailType
 from core.limbic.appraisal import AppraisalSystem
 from core.limbic.arch import NeuroState, DriveType
 from core.limbic.chemistry import NeuroChemistry
+from core.limbic.embodiment import HardwareEmbodiment
 from core.limbic.homeostasis import HomeostasisSystem
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,9 @@ class LimbicManager:
         self.chemistry = NeuroChemistry()
         self.homeostasis = HomeostasisSystem()
         self.appraisal = AppraisalSystem(api_client)
+
+        # 具身化模块
+        self.embodiment = HardwareEmbodiment(config)
 
         # 内存缓存
         self._state_cache: Optional[NeuroState] = None
@@ -136,6 +140,9 @@ class LimbicManager:
 
         # 1. 代谢
         self.chemistry.metabolize(state, now)
+
+        # 1.5 硬件具身化同步
+        self.embodiment.sync_hardware_to_state(state)
 
         # 2. 检查内驱力
         drive, intensity = self.homeostasis.check_drives(state)

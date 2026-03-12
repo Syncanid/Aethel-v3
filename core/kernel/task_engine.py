@@ -70,7 +70,7 @@ class TaskEngine:
             await self.incoming_events.put(event)
 
     async def _on_task_update(self, event: OneBotEvent):
-        """[新增] 处理来自 System 1 的实时信息补充"""
+        """处理来自 System 1 的实时信息补充"""
         payload_data = event.extra.get('task_payload')
         if not payload_data: return
 
@@ -156,18 +156,19 @@ class TaskEngine:
         [Core Loop] 从原 agent.py 阉割提取的长循环。
         """
         self.is_busy = True
+        final_result = "Unknown"
         try:
             # 1. 状态重置
             self.history.clear()
             self.scratchpad.update({
                 "current_task_id": task_id,
                 "current_goal": description,
+                "task_status": "normal",
                 "subtasks": [],
                 "progress_summary": "已接收指令，准备分析执行..."
             })
             self.tool_manager.agent_state = self.scratchpad
             self.last_response_used_tools = True
-            final_result = "Unknown"
 
             # 更新全局看板
             await global_task_registry.register_task(task_id, description)
@@ -186,6 +187,8 @@ class TaskEngine:
                 "content": f"【任务派发】\n目标: {description}\n上下文参数: {json.dumps(params, ensure_ascii=False)}\n请通过工具分步执行，并输出最终结论。"
             })
 
+            error_count = 0  # 追踪工具报错
+
             # ================= 长循环开始 =================
             while True:
                 # --- A. 更新 System Prompt 与状态同步 ---
@@ -195,7 +198,7 @@ class TaskEngine:
                     f"## Scratchpad\n"
                     f"这是你当前内部状态，必须维护和更新：\n{scratchpad_dump}"
                 )
-                self.history["content"] = final_system_prompt
+                self.history[0]["content"] = final_system_prompt
 
                 # 将目前 scratchpad 里的进度同步给外部全局看版
                 current_progress = self.scratchpad.get("progress_summary", f"执行中)")
@@ -231,9 +234,25 @@ class TaskEngine:
 
                         # 同步 Scratchpad
                         new_scratchpad = parsed_data.get("scratchpad", None)
+
                         if new_scratchpad and isinstance(new_scratchpad, dict):
+                            old_status = self.scratchpad.get("task_status", "normal")
+
                             self.scratchpad.update(new_scratchpad)
                             self.tool_manager.agent_state = self.scratchpad
+
+                            new_status = self.scratchpad.get("task_status", "normal")
+
+                            if new_status in ["stuck", "frustrated"] and old_status not in ["stuck", "frustrated"]:
+                                logger.warning(f"🧠 [System 2] 认知状态变为 {new_status}，触发情绪泄露！")
+                                frust_event = OneBotEvent(
+                                    type=EventType.NOTICE,
+                                    detail_type="internal_frustration",
+                                    source=source,
+                                    message=f"后台任务遇到死胡同了！当前进度：{self.scratchpad.get('progress_summary')}。这让你感到非常烦躁和挫败！你可以主动向用户发一句牢骚，或者直接向用户求助。",
+                                    extra={"task_id": task_id, "frustration_level": 2}
+                                )
+                                self.event_bus.publish_event(frust_event)
 
                         # 提取 Schema Tools
                         schema_calls = parsed_data.get("tool_calls", [])
@@ -258,7 +277,9 @@ class TaskEngine:
 
                         tool_execution_queue.append({"name": name, "args": args, "id": t_id})
 
-                # 3. 执行工具
+                # 3. 执行工具与跳出机制
+                is_finished = False
+
                 if tool_execution_queue:
                     self.last_response_used_tools = True
                     for task in tool_execution_queue:
@@ -272,12 +293,43 @@ class TaskEngine:
                             except json.JSONDecodeError:
                                 args = {}
 
+                        if name == "conclude_task":
+                            final_result = args.get("result", "未提供结论")
+                            status = args.get("status", "success")
+                            logger.info(f"✅ [System 2] 任务主动宣布结束。结论: {final_result[:50]}...")
+
+                            # 回填历史保证格式完备
+                            if t_id:
+                                self.history.append({"role": "tool", "tool_call_id": t_id, "name": name, "content": f"Task Concluded with status: {status}"})
+                            else:
+                                self.history.append({"role": "tool", "name": name, "content": f"Task Concluded with status: {status}"})
+
+                            is_finished = True
+                            break
+
+                        # 正常工具执行
                         try:
                             await global_task_registry.update_progress(task_id, f"调用工具: {name}...")
-                            # 调用 aggregator.py 里的 execute_tool
                             result = await self.tool_manager.execute_tool(name, args)
+                            error_count = 0  # 成功执行则重置挫败感
                         except Exception as e:
                             result = f"Error: {str(e)}"
+                            error_count += 1 # 记录连续失败次数
+
+                            # 失败达到阈值，触发情绪泄露给 S1
+                            if error_count >= 2:
+                                logger.warning(f"🔧 [System 2] 工具 {name} 连续失败，触发挫败感泄露！")
+                                frust_event = OneBotEvent(
+                                    type=EventType.NOTICE,
+                                    detail_type="internal_frustration",
+                                    source=source,
+                                    message=f"后台任务遇到大麻烦了！执行 {name} 连续报错：{str(e)[:50]}... 这让你感到非常烦躁和挫败！",
+                                    extra={"task_id": task_id, "frustration_level": error_count}
+                                )
+                                self.event_bus.publish_event(frust_event)
+
+                                # 顺便污染一下 S2 自己的上下文，让它后面的规划更倾向于放弃或换思路
+                                self.history.append({"role": "system", "content": "【情绪警告】你现在感到极度烦躁，如果这个方向走不通，立刻换个思路或求助用户，不要死磕！"})
 
                         if t_id:
                             self.history.append(
@@ -285,11 +337,9 @@ class TaskEngine:
                         else:
                             self.history.append({"role": "tool", "name": name, "content": str(result)})
                 else:
-                    # 4. 没有调用工具，说明任务得出最终结论 -> 跳出循环
                     self.last_response_used_tools = False
-                    logger.info(f"✅ [System 2] 任务已结束，结论已产生。")
 
-                    final_result = content_str or "Task completed without detailed text."
+                if is_finished:
                     await global_task_registry.complete_task(task_id, final_result)
 
                     # 发送回 EventBus 唤醒 S1
@@ -339,6 +389,33 @@ class TaskEngine:
         去掉了不需要的情绪(emotion_check)，保留了 planning 和 scratchpad。
         """
         tools = self.tool_manager.get_tool_schemas()
+        if tools is None:
+            tools = []
+
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "conclude_task",
+                "description": "当任务已经得出最终结论，或者确认彻底失败无法继续时，必须调用此工具来结束任务进程。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "result": {
+                            "type": "string",
+                            "description": "任务的最终执行结果、结论或失败原因汇总。此内容将直接作为最终报告。"
+                        },
+                        "status": {
+                            "type": "string",
+                            "enum": ["success", "failure"],
+                            "description": "任务最终定性状态。"
+                        }
+                    },
+                    "required": ["result", "status"],
+                    "additionalProperties": False
+                }
+            }
+        })
+
         use_schema_tools = self.config.get("llm.use_schema_tool_calls", True)
         arg_mode = self.config.get("llm.tool_call_arg_mode", "object")
 
@@ -355,6 +432,11 @@ class TaskEngine:
                 "type": "object",
                 "properties": {
                     "current_goal": {"type": "string"},
+                    "task_status": {
+                        "type": "string",
+                        "enum": ["normal", "working", "stuck", "frustrated", "completed"],
+                        "description": "当前任务的认知状态。如果思路受阻、方法无效、或迟迟没有进展，请务必将其修改为 stuck 或 frustrated。"
+                    },
                     "subtasks": {
                         "type": "array",
                         "items": {
@@ -370,7 +452,7 @@ class TaskEngine:
                     },
                     "progress_summary": {"type": "string", "description": "精简的一句话进度报告，将被用户看到"}
                 },
-                "required": ["current_goal", "subtasks", "progress_summary"],
+                "required": ["current_goal", "task_status", "subtasks", "progress_summary"],
                 "additionalProperties": False
             }
         }
@@ -412,4 +494,4 @@ class TaskEngine:
             schema=thought_structure,
             tool_choice="auto" if use_schema_tools else ("auto" if self.last_response_used_tools else "required")
         )
-        return response["choices"]["message"]
+        return response["choices"][0]["message"]

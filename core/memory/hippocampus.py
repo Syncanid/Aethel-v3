@@ -9,6 +9,7 @@ from core.evolution.mimicry import SocialMimicry
 from core.infrastructure.api_client import GenericAPIClient
 from core.infrastructure.config_loader import Config
 from core.infrastructure.database import Database
+from core.limbic.manager import LimbicManager
 from core.memory.schema import EpisodicMemory, SemanticMemory
 from core.memory.vector_store import VectorStore
 
@@ -16,11 +17,12 @@ logger = logging.getLogger(__name__)
 
 
 class Hippocampus:
-    def __init__(self, config: Config, api_client: GenericAPIClient, database: Database, agent_history: List[Dict]):
+    def __init__(self, config: Config, limbic: LimbicManager, api_client: GenericAPIClient, database: Database, agent_history: List[Dict]):
         """
         :param agent_history: 对 AutonomousAgent.history 的直接引用
         """
         self.config = config
+        self.limbic = limbic
         self.api_client = api_client
         self.database = database
         self.history_ref = agent_history  # 直接持有引用
@@ -71,7 +73,8 @@ class Hippocampus:
         # 并发启动两个独立循环
         await asyncio.gather(
             self._ingest_loop(),
-            self._dream_loop()
+            self._dream_loop(),
+            self._sleep_cycle_loop()
         )
 
     async def _ingest_loop(self):
@@ -159,6 +162,54 @@ class Hippocampus:
             except Exception as e:
                 logger.error(f"Dream loop error: {e}", exc_info=True)
                 await asyncio.sleep(5)
+
+    async def _sleep_cycle_loop(self):
+        """
+        睡眠周期：夜间执行 Episodic -> Semantic 压缩
+        """
+        while self.is_running:
+            # 每天凌晨 3 点执行压缩 (这里为了演示，可使用定时器或固定检测)
+            now = time.localtime()
+            if now.tm_hour == 3 and now.tm_min == 0:
+                logger.info("🌙 进入深度睡眠周期：开始压缩情景记忆...")
+                await self._compress_episodic_to_semantic()
+                await asyncio.sleep(60)  # 避免同一分钟内重复执行
+
+            await asyncio.sleep(30)  # 每半分钟检查一次时间
+
+    async def _compress_episodic_to_semantic(self):
+        """执行记忆压缩算法"""
+        # 1. 获取所有老旧的 Episodic 记忆 (例如7天前的)
+        seven_days_ago = time.time() - (7 * 86400)
+
+        # 通过 Chroma 获取这些数据 (需遍历所有 user_id，此处简化)
+        users_res = self.database.episodic_collection.get(include=["metadatas"])
+        user_ids = set(m.get("user_id") for m in users_res["metadatas"] if m)
+
+        for uid in user_ids:
+            old_memories = self.database.episodic_collection.get(
+                where={"user_id": uid, "created_at": {"$lt": seven_days_ago}},
+                include=["documents", "ids"]
+            )
+
+            if len(old_memories["ids"]) < 5:
+                continue  # 太少不值得压缩
+
+            content_list = old_memories["documents"]
+            prompt = f"""
+            你是一个睡眠中的大脑。请将以下零散的短期对话情景记忆，压缩提取为1-2条关于用户的【长期的、概括性的事实或习惯】。
+            原始片段：{json.dumps(content_list, ensure_ascii=False)}
+            """
+
+            resp = await self.api_client.create_chat_completion([{"role": "user", "content": prompt}])
+            compressed_fact = resp["choices"][0]["message"]["content"].strip()
+
+            # 存入 Semantic
+            await self.vector_store.save_vector_memory(SemanticMemory(content=compressed_fact), uid)
+
+            # 删除旧的 Episodic (遗忘细节)
+            self.database.episodic_collection.delete(ids=old_memories["ids"])
+            logger.info(f"🧠 [睡眠压缩] 提取事实：{compressed_fact}，并删除了 {len(old_memories['ids'])} 条旧细节。")
 
     def _scan_delta(self) -> List[Dict]:
         """扫描增量消息 (仅在内存中操作，极快)"""
@@ -260,6 +311,12 @@ class Hippocampus:
             data = json.loads(resp["choices"][0]["message"]["content"])
             memories = data.get("memories", [])
 
+            # 在保存记忆前，获取当前边缘系统情绪
+            current_state = await self.limbic.get_state()
+            dop = current_state.dopamine
+            cor = current_state.cortisol
+            ser = current_state.serotonin
+
             for mem in memories:
                 puid = mem.get("puid", "unknown")
                 content = mem["content"]
@@ -270,9 +327,11 @@ class Hippocampus:
                     key = mem.get("key", "misc")
                     await self.vector_store.save_core_memory(puid, key, content)
                 elif mem["type"] == "episodic":
-                    await self.vector_store.save_vector_memory(EpisodicMemory(content=content), puid)
+                    em = EpisodicMemory(content=content, emotion_dopamine=dop, emotion_cortisol=cor, emotion_serotonin=ser)
+                    await self.vector_store.save_vector_memory(em, puid)
                 elif mem["type"] == "semantic":
-                    await self.vector_store.save_vector_memory(SemanticMemory(content=content), puid)
+                    sm = SemanticMemory(content=content, emotion_dopamine=dop, emotion_cortisol=cor, emotion_serotonin=ser)
+                    await self.vector_store.save_vector_memory(sm, puid)
 
             if memories:
                 logger.info(f"归档完成: 为 {len(set(m['puid'] for m in memories))} 位用户生成了 {len(memories)} 条记忆")

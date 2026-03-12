@@ -22,6 +22,7 @@ async def send_message(
         target_id: str,
         target_type: Literal["private", "group", "channel"],
         event_bus: EventBus = None,
+        agent: Any = None,
 ) -> str:
     """
     发送消息。支持指定发送目标（私聊/群组）。
@@ -37,52 +38,87 @@ async def send_message(
     if not target_id:
         return "错误: 无法确定发送目标 (target_id 为空)。"
 
-    # 2. 构造 Action 参数
-    params = {
-        "message": message,
-        "user_id": target_id if target_type == "private" else None,
-        "group_id": target_id if target_type == "group" else None,
-        "detail_type": target_type
-    }
-
-    # 3. 发布动作
-    action = Action(
-        action="send_message",
-        params=params,
-        target_platform=platform  # 指定平台适配器处理
-    )
-
-    # 2. 同步分发并等待结果
+    # ==========================================
+    # 1. 情绪碎片化处理 (Fragmentation)
+    # ==========================================
+    fragments = []
     try:
-        # 设置 10 秒超时，避免 Agent 永久卡死
-        response = await event_bus.dispatch_action(action, timeout=10.0)
+        # 延迟导入我们上一阶段编写的 OutputFragmenter
+        from core.io.fragmentation import OutputFragmenter
 
-        # 3. 处理不同的结果状态
-        if response.status == ActionStatus.OK:
-            # 成功
-            return f"消息已完成发送 [{platform}] {target_type}: {target_id}"
-
+        # 尝试从 agent 实例中获取 limbic 状态
+        if agent and hasattr(agent, "limbic"):
+            state = await agent.limbic.get_state()
+            # 将 LLM 生成的完整文本切碎，并附带计算好的延迟时间
+            fragments = OutputFragmenter.fragment(message, state)
         else:
-            # 失败处理
-            error_msg = response.message
-
-            # 特殊错误：平台不存在 (Route not matched)
-            if "Route not matched" in error_msg:
-                return (
-                    f"发送失败: 找不到平台适配器 '{platform}'。\n"
-                    f"可能原因：\n"
-                    f"1. 平台名称拼写错误\n"
-                    f"2. 该平台的适配器未在 main.py 中加载"
-                )
-
-            # 其他错误 (如网络超时、被禁言)
-            return f"发送失败: {error_msg}"
-
-    except asyncio.TimeoutError:
-        return f"发送超时: 平台 '{platform}' 在 10 秒内没有响应。"
+            # 如果获取不到状态，降级为整段发送，无延迟
+            fragments = [(message, 0.0)]
+    except ImportError:
+        logger.warning("未找到 OutputFragmenter 模块，降级为普通发送模式。")
+        fragments = [(message, 0.0)]
     except Exception as e:
-        return f"系统异常: 发送过程中发生错误 - {str(e)}"
+        logger.error(f"消息碎片化处理异常: {e}", exc_info=True)
+        fragments = [(message, 0.0)]
 
+    if not fragments:
+        return "消息已被过滤或为空，未发送任何内容。"
+
+    # ==========================================
+    # 2. 带有真实感停顿的循环发送
+    # ==========================================
+    final_status = ""
+
+    for index, (frag_text, delay) in enumerate(fragments):
+        # 模拟人类打字停顿
+        if delay > 0:
+            logger.debug(f"模拟情绪打字停顿: {delay:.2f} 秒...")
+            await asyncio.sleep(delay)
+
+        # 构造 Action 参数
+        params = {
+            "message": frag_text,
+            "user_id": target_id if target_type == "private" else None,
+            "group_id": target_id if target_type == "group" else None,
+            "detail_type": target_type
+        }
+
+        # 发布动作
+        action = Action(
+            action="send_message",
+            params=params,
+            target_platform=platform  # 指定平台适配器处理
+        )
+
+        try:
+            # 设置 10 秒超时，避免 Agent 永久卡死
+            response = await event_bus.dispatch_action(action, timeout=10.0)
+
+            # 处理不同的结果状态
+            if response.status == ActionStatus.OK:
+                final_status = f"消息已完成发送 [{platform}] {target_type}: {target_id}"
+            else:
+                # 失败处理
+                error_msg = response.message
+
+                # 特殊错误：平台不存在
+                if "Route not matched" in error_msg:
+                    return (
+                        f"发送失败: 找不到平台适配器 '{platform}'。\n"
+                        f"可能原因：\n"
+                        f"1. 平台名称拼写错误\n"
+                        f"2. 该平台的适配器未在 main.py 中加载"
+                    )
+                # 如果某一个碎片发送失败，直接向 LLM 返回报错，打断后续连发
+                return f"发送失败 (片段 {index + 1}/{len(fragments)}): {error_msg}"
+
+        except asyncio.TimeoutError:
+            return f"发送超时: 平台 '{platform}' 在 10 秒内没有响应 (片段 {index + 1})。"
+        except Exception as e:
+            return f"系统异常: 发送过程中发生错误 - {str(e)}"
+
+    # 循环走完，说明所有碎片都发送成功
+    return final_status
 
 # --- 内部辅助函数：发送唤醒事件 ---
 async def _dispatch_wake_up(event_bus: EventBus, reason: str):

@@ -17,6 +17,14 @@ class BaseMemory:
     created_at: float = field(default_factory=time.time)
     source_role: str = "user"  # 'user', 'assistant', 'system'
 
+    # 情绪上下文：编码记忆时的内分泌状态
+    emotion_dopamine: float = 0.5
+    emotion_cortisol: float = 0.5
+    emotion_serotonin: float = 0.5
+
+    # 记忆被回忆的次数 (用于触发再巩固)
+    access_count: int = 0
+
     # 有效期 (Unix Timestamp)，None 表示永久有效
     valid_until: Optional[float] = None
     # 状态：active (有效), inactive (失效/已解决), expired (过期)
@@ -28,6 +36,10 @@ class BaseMemory:
             "created_at": self.created_at,
             "source": self.source_role,
             "status": self.status,
+            "emotion_dopamine": self.emotion_dopamine,
+            "emotion_cortisol": self.emotion_cortisol,
+            "emotion_serotonin": self.emotion_serotonin,
+            "access_count": self.access_count,
             "type": "base"
         }
         if self.valid_until is not None:
