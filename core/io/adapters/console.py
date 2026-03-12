@@ -59,7 +59,7 @@ class ConsoleAdapter(BaseAdapter):
         """
         # 简单的路由判断：如果是广播或者目标是 console，则显示
         if action.target_platform and action.target_platform != self.platform_name:
-            return
+            return None
 
         if action.action == "send_message":
             params = action.params

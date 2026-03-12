@@ -101,7 +101,7 @@ async def browse_website(
             for element in soup(["script", "style", "nav", "footer", "aside", "iframe", "noscript"]):
                 element.decompose()
 
-            text = soup.get_text(separator='\n')
+            text = soup.get_text(separator="\n")
 
             # 清理空行
             lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -122,8 +122,8 @@ async def browse_website(
 async def send_http_request(
         method: str,
         url: str,
-        headers: str = None,
-        data: str = None
+        headers: Optional[dict] = None,
+        data: Optional[str] = None
 ) -> str:
     """
     [Network] 发送自定义 HTTP 请求 (GET, POST, PUT, DELETE)。
@@ -132,17 +132,21 @@ async def send_http_request(
     Args:
         method: 请求方法 (GET, POST 等)。
         url: 请求地址。
-        headers: JSON 格式的请求头字符串 (可选)。
+        headers: 请求头字典 (可选)。
         data: 请求体内容 (可选)。
     """
     method = method.upper()
 
+    # 直接处理传入的字典或字符串，增强鲁棒性
     json_headers = {}
     if headers:
-        try:
-            json_headers = json.loads(headers)
-        except:
-            return "错误: headers 必须是有效的 JSON 字符串。"
+        if isinstance(headers, dict):
+            json_headers = headers
+        elif isinstance(headers, str):
+            try:
+                json_headers = json.loads(headers)
+            except:
+                return "错误: headers 解析失败，请提供有效的字典或 JSON 字符串。"
 
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
@@ -164,10 +168,10 @@ async def download_file(
         url: str,
         save_path: Optional[str] = None,
         filename: Optional[str] = None,
-        headers: Optional[str] = None,
+        headers: Optional[dict] = None,
         timeout: Optional[float] = 300.0,
-        chunk_size: int = 8192,
-        overwrite: bool = False
+        chunk_size: Optional[int] = 8192,
+        overwrite: Optional[bool] = False
 ) -> str:
     """
     [Network] 下载文件并保存到本地磁盘。
@@ -177,7 +181,7 @@ async def download_file(
         url: 要下载的文件 URL 地址。
         save_path: 保存目录路径（可选），默认为当前工作目录下的 'downloads' 文件夹。
         filename: 指定保存的文件名（可选），不指定则从 URL 或 Content-Disposition 自动提取。
-        headers: JSON 格式的请求头字符串（可选），如认证信息。
+        headers: 请求头字典（可选），如认证信息。
         timeout: 下载超时时间（秒），默认 300 秒（5 分钟），大文件可适当延长。
         chunk_size: 分块下载大小（字节），默认 8KB。
         overwrite: 是否覆盖已存在的同名文件，默认 False（跳过下载）。
@@ -187,15 +191,19 @@ async def download_file(
     """
     from urllib.parse import urlparse, unquote
 
-    # 解析请求头
+    # 解析请求头，直接合并字典
     json_headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
     }
+
     if headers:
-        try:
-            json_headers.update(json.loads(headers))
-        except json.JSONDecodeError:
-            return "错误: headers 必须是有效的 JSON 字符串。"
+        if isinstance(headers, dict):
+            json_headers.update(headers)
+        elif isinstance(headers, str):
+            try:
+                json_headers.update(json.loads(headers))
+            except json.JSONDecodeError:
+                return "错误: headers 必须是有效的 JSON 字符串或字典。"
 
     # 准备保存路径
     if save_path is None:

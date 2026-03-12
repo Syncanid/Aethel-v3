@@ -12,7 +12,7 @@ from core.infrastructure.api_client import GenericAPIClient
 from core.infrastructure.config_loader import Config
 from core.infrastructure.database import Database
 from core.io.event_bus import EventBus
-from core.io.event_schema import OneBotEvent, DetailType, EventType
+from core.io.event_schema import OneBotEvent, DetailType, EventType, Action
 from core.kernel.task_registry import global_task_registry
 from core.tool_manager.aggregator import ToolManager
 
@@ -25,6 +25,10 @@ class DummySource:
     def __init__(self, data):
         for k, v in data.items():
             setattr(self, k, v)
+
+    def model_dump(self):
+        """伪装成 Pydantic 模型，输出字典供 JSON 序列化"""
+        return self.__dict__
 
 
 class TaskEngine:
@@ -104,8 +108,13 @@ class TaskEngine:
         else:
             source_dict = {}
             if hasattr(self, "_current_task_source") and self._current_task_source:
-                source_dict = self._current_task_source.model_dump() if hasattr(self._current_task_source,
-                                                                                'model_dump') else self._current_task_source
+                # 兼容原生的 Pydantic Model 和恢复出的 DummySource
+                if hasattr(self._current_task_source, 'model_dump'):
+                    source_dict = self._current_task_source.model_dump()
+                elif hasattr(self._current_task_source, '__dict__'):
+                    source_dict = self._current_task_source.__dict__
+                else:
+                    source_dict = dict(self._current_task_source)
 
             state = {
                 "is_busy": self.is_busy,
@@ -289,8 +298,7 @@ class TaskEngine:
                     base_system_prompt = "You are Aethel's Task Engine."
 
                 # 更新 System prompt 防止代码改变
-                if self.history and self.history[0].get("role") == "system":
-                    self.history[0]["content"] = base_system_prompt
+                self.history[0]["content"] = base_system_prompt
 
                 # 告知 Agent 发生了灾难恢复
                 self.history.append({
@@ -315,6 +323,15 @@ class TaskEngine:
                 # 将目前 scratchpad 里的进度同步给外部全局看版
                 current_progress = self.scratchpad.get("progress_summary", f"执行中)")
                 await global_task_registry.update_progress(task_id, current_progress)
+
+                try:
+                    async with aiofiles.open("data/messages_in_memory_s2.json", "w", encoding="utf-8") as f:
+                        await f.write(json.dumps(self.history, ensure_ascii=False, indent=4))
+
+                    async with aiofiles.open("data/prompt_in_memory_s2.txt", "w", encoding="utf-8") as f:
+                        await f.write(final_system_prompt)
+                except Exception as e:
+                    logger.warning(f"Failed to write S2 debug logs: {e}")
 
                 # --- B. 思考 (Call LLM) ---
                 response_msg = await self._call_llm()
@@ -343,6 +360,14 @@ class TaskEngine:
                 if content_str:
                     try:
                         parsed_data = json.loads(content_str)
+
+                        # 提取并广播 S2 的思考过程
+                        monologue = parsed_data.get("inner_monologue", {})
+                        plan = monologue.get("planning", "正在思考下一步...")
+                        self.event_bus.publish_action(Action(
+                            action="broadcast_log",
+                            params={"content": f"⚙️ [S2 深度思考] {plan}"}
+                        ))
 
                         # 同步 Scratchpad
                         new_scratchpad = parsed_data.get("scratchpad", None)
@@ -423,6 +448,11 @@ class TaskEngine:
 
                         # 正常工具执行
                         try:
+                            self.event_bus.publish_action(Action(
+                                action="broadcast_log",
+                                params={"content": f"🛠️ [S2 任务引擎] 调用工具: {name}({args})"}
+                            ))
+
                             await global_task_registry.update_progress(task_id, f"调用工具: {name}...")
                             result = await self.tool_manager.execute_tool(name, args)
                             error_count = 0  # 成功执行则重置挫败感
@@ -441,10 +471,6 @@ class TaskEngine:
                                     extra={"task_id": task_id, "frustration_level": error_count}
                                 )
                                 self.event_bus.publish_event(frust_event)
-
-                                # 顺便污染一下 S2 自己的上下文，让它后面的规划更倾向于放弃或换思路
-                                self.history.append({"role": "system",
-                                                     "content": "【情绪警告】你现在感到极度烦躁，如果这个方向走不通，立刻换个思路或求助用户，不要死磕！"})
 
                         if t_id:
                             self.history.append(

@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 @register()
-async def list_directory(path: str = ".", max_depth: int = 1) -> str:
+async def list_directory(path: str = ".", max_depth: Optional[int] = 1) -> str:
     """
     [FileSystem] 列出指定目录下的文件结构。
 
@@ -57,7 +57,7 @@ async def list_directory(path: str = ".", max_depth: int = 1) -> str:
 
 
 @register()
-async def read_file(path: str, purpose: str, start_line: int = 1, end_line: int = -1,) -> str:
+async def read_file(path: str, purpose: str, start_line: Optional[int] = 1, end_line: Optional[int] = -1,) -> str:
     """
     [FileSystem] 读取文件内容。支持读取指定行范围。
 

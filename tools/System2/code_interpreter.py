@@ -5,7 +5,7 @@ import contextlib
 import io
 import logging
 import traceback
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from core.tool_manager.registry import register
 
@@ -52,8 +52,8 @@ class SecurityError(Exception):
 @register()
 async def run_python_code(
         code: str,
-        timeout: int = 30,
-        reset_session: bool = False
+        timeout: Optional[int] = 30,
+        reset_session: Optional[bool] = False
 ) -> Dict[str, Any]:
     """
     [Omnipotent] 执行 Python 代码的沙箱解释器。支持变量状态保持 (REPL 模式)。

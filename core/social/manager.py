@@ -38,7 +38,6 @@ class UserManager:
                                )
                                """)
             await conn.commit()
-        logger.info("社交系统 (Social System) 已初始化")
 
     async def get_user(self, puid: str) -> Optional[UserProfile]:
         """获取用户 (Read Only)"""

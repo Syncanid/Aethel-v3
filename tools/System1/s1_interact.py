@@ -2,7 +2,9 @@
 import json
 import os
 import time
+from typing import Optional
 
+from core.io.event_bus import EventBus
 from core.io.event_schema import OneBotEvent, EventType, DetailType, TaskPayload, EventSource
 from core.tool_manager.registry import register
 
@@ -10,14 +12,16 @@ from core.tool_manager.registry import register
 @register()
 async def dispatch_background_task(
         task_description: str,
-        parameters: dict,
-        event_bus=None,
+        parameters: Optional[dict] = None,
+        event_bus: EventBus = None,
 ) -> str:
     """
     当用户要求执行复杂任务（如：搜索网络、分析文件、写代码、查系统状态、多步推理等）时，调用此工具将任务派发给后台 System 2 处理。
     :param task_description: 任务的详细描述，例如 '搜索今天的新闻并总结' 或 '扫描本地端口'
     :param parameters: 任务所需的参数字典，如 {"url": "xxx"}，如果没有可传 {}
     """
+    if parameters is None:
+        parameters = {}
     task_id = f"task_{int(time.time())}"
 
     # 构造 TaskPayload (复用我们阶段 1 写的结构)

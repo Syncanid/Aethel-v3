@@ -83,7 +83,7 @@ async def explore_entity_graph(
     """
     store = _get_store()
     # 强制进行图谱多跳检索
-    results = await store._search_graph_edges(query=entity_name, user_id=puid, limit=15)
+    results = await store.search_graph_edges(query=entity_name, user_id=puid, limit=15)
 
     if not results:
         return f"知识图谱中未发现关于实体 '{entity_name}' 的连接网络。"
@@ -108,7 +108,6 @@ async def explore_entity_graph(
 async def memorize_absolute_fact(
         content: str,
         puid: str,
-        event_bus: EventBus
 ) -> str:
     """
     [写入] 强制刻印客观事实 (Semantic Memory)。

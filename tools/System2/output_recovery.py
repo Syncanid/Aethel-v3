@@ -1,5 +1,4 @@
 # tools/System2/output_recovery.py
-from core.io.event_bus import EventBus
 from core.tool_manager.output_cache import ToolOutputCache
 from core.tool_manager.registry import register
 

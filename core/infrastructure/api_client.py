@@ -54,7 +54,6 @@ class GenericAPIClient:
             timeout = httpx.Timeout(120.0, connect=10.0, read=120.0)
 
             # 如果配置了代理，则使用自定义的 httpx.AsyncClient
-            http_client = None
             if self.proxy:
                 http_client = httpx.AsyncClient(proxy=self.proxy, timeout=timeout)
             else:

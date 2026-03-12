@@ -122,8 +122,6 @@ class VectorStore:
                         duplicate_id = existing_id
                         logger.info(f"检测到重复记忆 (相似度 {similarity:.2f})，触发合并策略。")
 
-            target_id = None
-
             # 3. 分支处理
             if is_duplicate:
                 target_id = duplicate_id
@@ -274,7 +272,7 @@ class VectorStore:
             # 降级方案：保留现有的正则逻辑作为兜底
             return re.findall(r'[a-zA-Z0-9_]+|[\u4e00-\u9fa5]{2,}', query)
 
-    async def _search_graph_edges(self, query: str, user_id: str, limit: int = 5) -> List[Dict]:
+    async def search_graph_edges(self, query: str, user_id: str, limit: int = 5) -> List[Dict]:
         """
         2-Hop 知识图谱子图检索引擎 (GraphRAG)
         提取实体 -> 命中种子节点 (Hop 1) -> 扩展邻居节点 (Hop 2) -> 距离衰减打分
@@ -431,7 +429,7 @@ class VectorStore:
                 logger.warning(f"FTS5 检索解析跳过 (可能是查询不含明确词汇): {e}")
 
         # 路三：图谱检索 (1-hop 逻辑关系扩展)
-        graph_results = await self._search_graph_edges(query, user_id, limit)
+        graph_results = await self.search_graph_edges(query, user_id, limit)
 
         # 融合：三路 RRF
         merged_results = self._rrf_merge([vector_results, text_results, graph_results])

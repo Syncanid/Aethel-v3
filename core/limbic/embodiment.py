@@ -16,7 +16,7 @@ class HardwareEmbodiment:
     """
 
     def __init__(self, config: Config):
-        self.enabled = config.get("limbic.embodiment.enable", False)
+        self.enabled = config.get("system.limbic_embodiment", False)
         # 上下文占用率 (0.0 ~ 1.0)，由外围 Agent 推断或计算后写入
         self.context_usage_percent = 0.0
 
@@ -74,9 +74,7 @@ class HardwareEmbodiment:
             disk = psutil.disk_usage('/')
             disk_free_gb = disk.free / (1024 ** 3)
 
-            status_lines = []
-            status_lines.append(
-                f"[躯体感知] 宿主 CPU: {cpu}% | 内存: {mem}% | 磁盘剩余: {disk_free_gb:.1f}GB | Context占用: {self.context_usage_percent * 100:.1f}%")
+            status_lines = [f"[躯体感知] 宿主 CPU: {cpu}% | 内存: {mem}% | 磁盘剩余: {disk_free_gb:.1f}GB | Context占用: {self.context_usage_percent * 100:.1f}%"]
 
             # 极值状态的文字化污染
             if cpu > 85:
@@ -89,5 +87,7 @@ class HardwareEmbodiment:
                     "【记忆过载】你的短期记忆缓冲区快满了，感觉头痛欲裂。对用户的长篇大论表现出明显的不耐烦。")
 
             return "\n".join(status_lines)
-        except:
+
+        except Exception as e:
+            logger.error(f"具身化旁白生成失败: {e}", exc_info=True)
             return ""

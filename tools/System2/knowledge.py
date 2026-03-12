@@ -4,7 +4,6 @@ import os
 from core.infrastructure.api_client import GenericAPIClient
 from core.infrastructure.config_loader import get_config
 from core.infrastructure.database import Database
-from core.io.event_bus import EventBus
 from core.memory.ingestor import KnowledgeIngestor
 from core.memory.vector_store import VectorStore
 from core.tool_manager.registry import register
@@ -79,6 +78,7 @@ async def edit_knowledge(
     Args:
         memory_id: 记忆 ID。
         new_content: 新的文本内容。
+        memory_type: 记忆类型 ('core', 'episodic', 'semantic')，默认为 semantic。
     """
     _, store = _get_components()
     success = await store.update_memory_content(memory_type, memory_id, new_content, "admin_console")

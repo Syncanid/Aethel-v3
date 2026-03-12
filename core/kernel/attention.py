@@ -1,7 +1,6 @@
 # core/kernel/attention.py
 import json
 import logging
-import math
 import time
 from enum import Enum
 from typing import Optional, List, Tuple, Dict
@@ -22,10 +21,10 @@ INTEREST_STORE_KEY = "CURRENT_INTEREST_VECTOR"
 
 
 class ReactionType(str, Enum):
-    REPLY = "reply"  # 必须回复 (直接交互/强相关)
-    INTERJECT = "interject"  # 主动插话 (弱交互/感兴趣)
-    OBSERVE = "observe"  # 静默观察 (无价值/不相关/插话阈值过高)
-    IGNORE = "ignore"  # 完全忽略 (如黑名单/无关系统通知)
+    REPLY = "reply"  # 必须回复 (直接交互/强相关/系统任务)
+    INTERJECT = "interject"  # 主动插话 (弱交互/熟人特权/极度感兴趣)
+    OBSERVE = "observe"  # 静默观察 (无价值/插话阈值过高)
+    IGNORE = "ignore"  # 完全忽略 (黑名单/绝对不想理睬)
 
 
 class AttentionFilter:
@@ -40,202 +39,224 @@ class AttentionFilter:
         self.nickname = prompt.role_data.get("identity", {}).get("name", "Aethel")
 
         # --- 内部状态 ---
-        self.last_reply_time = 0.0
         self._cached_interest_vector: Optional[List[float]] = None
         self._cached_interest_text: str = ""
         self._last_interest_update = 0.0
 
-        # --- 默认配置 ---
-        # 基础阈值：越低越容易触发
-        self.BASE_THRESHOLD = 0.60
-        # 对话惯性：刚说过话后，阈值降低多少 (更容易接话)
-        self.CONVERSATION_INERTIA = 0.25
-        # 惯性持续时间 (秒)
-        self.INERTIA_WINDOW = 120
+        # 记录不同上下文 (私聊/群聊) 的最后一次回复时间，用于计算“对话惯性”
+        self.active_conversations: Dict[str, float] = {}
+
+        # 基础阈值 (阈值越低越容易触发插话)
+        self.BASE_THRESHOLD = 0.65
+
+    def _get_context_id(self, event: OneBotEvent) -> str:
+        """获取当前事件的上下文 ID"""
+        if event.source.group_id:
+            return f"group_{event.source.group_id}"
+        return f"private_{event.source.user_id}"
+
+    def _update_inertia(self, event: OneBotEvent):
+        """更新对话惯性时间戳"""
+        ctx_id = self._get_context_id(event)
+        self.active_conversations[ctx_id] = time.time()
 
     async def evaluate(self, event: OneBotEvent, recent_history: Optional[List[Dict]] = None) -> ReactionType:
         """
-        [主入口] 评估事件重要性
-        流程: 硬规则 -> 语义门控(Pre-Filter) -> LLM软规则(Soft-Rule)
+        [主入口] 三级漏斗式注意力过滤网
         """
-        # 1. 基础过滤
-        if event.type != EventType.MESSAGE:
-            if event.detail_type == DetailType.INTERNAL_DRIVE:
-                return ReactionType.REPLY
-            return ReactionType.IGNORE
-
-        # 2. 硬规则 - 绝对优先
-        # 包含: @我, 私聊, 呼叫名字
-        if hard_reaction := self._check_hard_rules(event):
-            self.last_reply_time = time.time()  # 更新活跃时间
+        # ==========================================
+        # 第一级漏斗：绝对本能反射 (Hard Rules)
+        # ==========================================
+        hard_reaction = self._check_hard_rules(event)
+        if hard_reaction:
+            if hard_reaction in [ReactionType.REPLY, ReactionType.INTERJECT]:
+                self._update_inertia(event)
             return hard_reaction
 
-        # --- 获取动态生理阈值 ---
-        # 这个阈值将贯穿 语义门控 和 LLM决策 两个阶段
-        dynamic_threshold, state_desc = await self._calculate_dynamic_threshold()
+        # 过了硬规则后，只有 MESSAGE 事件才值得继续分析
+        if event.type != EventType.MESSAGE:
+            return ReactionType.IGNORE
 
-        # 语义门控不成熟
-        # # 3. 语义门控
-        # # 这是一个低成本的向量检查，决定是否值得消耗 Token 进 LLM
-        # gate_passed, gate_reason = await self._semantic_gate_check(event, dynamic_threshold, state_desc)
-        #
-        # if not gate_passed:
-        #     # 门控未通过 -> 直接忽略
-        #     return ReactionType.IGNORE
+        # ==========================================
+        # 第二级漏斗：社交亲密度门控 (Social Gate)
+        # ==========================================
+        social_reaction = await self._check_social_gate(event)
+        if social_reaction:
+            if social_reaction in [ReactionType.REPLY, ReactionType.INTERJECT]:
+                self._update_inertia(event)
+            return social_reaction
 
-        # 4. 软规则
-        # 只有过了门控的精英消息，才有资格让大脑(LLM)思考
+        # ==========================================
+        # 第三级漏斗：边缘系统驱动的动态评估 (LLM Soft Rules)
+        # ==========================================
+        dynamic_threshold, state_desc = await self._calculate_dynamic_threshold(event)
         soft_reaction = await self._check_soft_rules(event, dynamic_threshold, state_desc, recent_history)
 
-        # 如果 LLM 决定回复，更新活跃时间
         if soft_reaction in [ReactionType.REPLY, ReactionType.INTERJECT]:
-            self.last_reply_time = time.time()
+            self._update_inertia(event)
 
         return soft_reaction
 
-    async def _calculate_dynamic_threshold(self) -> Tuple[float, str]:
+    def _check_hard_rules(self, event: OneBotEvent) -> Optional[ReactionType]:
+        """第一级漏斗：无条件触发的系统规则"""
+
+        # 0. 系统后台强中断 (绝对优先，解决拦截任务更新的痛点)
+        if getattr(event, "type", "") in [EventType.TASK, "task"] or getattr(event, "detail_type", "") in [
+            DetailType.TASK_PROGRESS, DetailType.TASK_COMPLETE, "ask_system1_for_help", "task_update", "task_dispatch"
+        ]:
+            logger.info("⚡ [Attention] 触发本能反射：接收到后台任务调度/更新。")
+            return ReactionType.REPLY
+
+        if getattr(event, "detail_type", "") == DetailType.INTERNAL_DRIVE:
+            logger.info("⚡ [Attention] 触发本能反射：生理驱动力告警。")
+            return ReactionType.REPLY
+
+        # 仅限文本消息的检查
+        if event.type != EventType.MESSAGE:
+            return None
+
+        msg_text = getattr(event, "alt_message", "") or ""
+
+        # 1. 明确提及 (@我)
+        if self.bot_self_id and f"[CQ:at,qq={self.bot_self_id}]" in msg_text:
+            return ReactionType.REPLY
+
+        # 2. 呼叫名字开头
+        if self.nickname and msg_text.strip().startswith(self.nickname):
+            return ReactionType.REPLY
+
+        # 3. 私聊强制接管 (私聊中没有插话概念，所有消息必须被看到)
+        if getattr(event, "detail_type", "") in [DetailType.PRIVATE, "private"]:
+            return ReactionType.REPLY
+
+        return None
+
+    async def _check_social_gate(self, event: OneBotEvent) -> Optional[ReactionType]:
+        """第二级漏斗：熟人特权与黑名单过滤"""
+        puid = f"{event.source.platform}:{event.source.user_id}"
+
+        async with self.db.get_connection() as conn:
+            cursor = await conn.execute("SELECT data_json FROM social_users WHERE puid=?", (puid,))
+            row = await cursor.fetchone()
+
+        if not row:
+            return None  # 陌生人，放入下一级 LLM 评估
+
+        user_data = json.loads(row[0])
+        trust = user_data.get("trust", 0.0)
+        favorability = user_data.get("favorability", 0.0)
+        intimacy = user_data.get("intimacy", 0.0)
+
+        # 1. 厌恶/黑名单过滤 (好感度或信任度极低)
+        if favorability < -30 or trust < -50:
+            logger.info(f"🛑 [Attention] 社交门控：静默过滤厌恶用户 ({puid})")
+            return ReactionType.IGNORE
+
+        # 2. 挚友/管理员插话特权 (如果在群聊中，且关系极好，给予极高概率免 LLM 插话)
+        if event.source.group_id:
+            score = (trust + favorability + intimacy) / 300.0  # 粗略归一化到 0~1
+            if score > 0.8:
+                logger.info(f"✨ [Attention] 社交门控：高亲密度特权放行 ({puid})")
+                return ReactionType.INTERJECT
+
+        return None
+
+    async def _calculate_dynamic_threshold(self, event: OneBotEvent) -> Tuple[float, str]:
         """
-        根据边缘系统状态计算动态阈值
-        公式: Thr = Base + (Dopamine * 0.15) - (Boredom * 0.3) - (Inertia)
+        计算边缘系统动态阈值，影响 LLM 的敏感度。
+        公式: Thr = Base - (Dopamine * 0.2) + (Cortisol * 0.3) - (Inertia)
         """
         state = await self._get_neuro_state()
         threshold = self.BASE_THRESHOLD
         factors = []
 
-        # A. 多巴胺 (快乐/忙碌) -> 提高阈值 (变高冷)
-        # 范围 0.0~1.0 -> 修正 +0.0 ~ +0.15
-        dopa_mod = state.dopamine * 0.15
-        threshold += dopa_mod
-        factors.append(f"Dopa+{dopa_mod:.2f}")
+        # A. 多巴胺 (兴奋/开心) -> 降低阈值 (变得话痨)
+        if state.dopamine > 0.5:
+            mod = (state.dopamine - 0.5) * 0.4
+            threshold -= mod
+            factors.append(f"Excited-{mod:.2f}")
 
-        # B. 社交饱腹感 (孤独/无聊) -> 降低阈值 (变渴望)
-        # Satiety 1.0 (饱) -> Mod 0.0
-        # Satiety 0.0 (饿) -> Mod -0.25
-        boredom_mod = (1.0 - state.social_satiety) * 0.25
-        threshold -= boredom_mod
-        factors.append(f"Lonely-{boredom_mod:.2f}")
+        # B. 皮质醇 (压力/焦虑/烦躁) -> 大幅提高阈值 (变得自闭/高冷)
+        if state.cortisol > 0.5:
+            mod = (state.cortisol - 0.5) * 0.6
+            threshold += mod
+            factors.append(f"Stressed+{mod:.2f}")
 
-        # C. 对话惯性 (Recently Active) -> 大幅降低阈值
-        # 刚刚还在说话，应该很容易接话
-        time_diff = time.time() - self.last_reply_time
-        if time_diff < self.INERTIA_WINDOW:
-            inertia_mod = self.CONVERSATION_INERTIA * (1 - (time_diff / self.INERTIA_WINDOW))
-            threshold -= inertia_mod
-            factors.append(f"Inertia-{inertia_mod:.2f}")
+        # C. 社交饱腹感 (孤独) -> 降低阈值 (极度渴望聊天)
+        if state.social_satiety < 0.3:
+            mod = (0.3 - state.social_satiety) * 0.5
+            threshold -= mod
+            factors.append(f"Lonely-{mod:.2f}")
 
-        # 钳位
-        threshold = max(0.2, min(0.95, threshold))
+        # D. 对话惯性 (Recently Active) -> 降低阈值 (保持聊天连贯)
+        ctx_id = self._get_context_id(event)
+        last_time = self.active_conversations.get(ctx_id, 0)
+        time_diff = time.time() - last_time
+        if time_diff < 60:
+            mod = 0.25 * (1 - (time_diff / 60))
+            threshold -= mod
+            factors.append(f"Inertia-{mod:.2f}")
 
+        threshold = max(0.1, min(0.95, threshold))
         return threshold, ",".join(factors)
 
-    # --- 核心组件 1：语义门控 ---
-    async def _semantic_gate_check(self, event: OneBotEvent, threshold: float, state_desc: str) -> Tuple[bool, str]:
-        """
-        计算 (消息向量 vs 兴趣向量) 的相似度，并与 (生理驱动动态阈值) 比较。
-        """
-        message_text = event.alt_message
-        if not message_text or len(message_text) < 2:
-            return False, "消息太短"
-
-        # 1. 获取当前兴趣向量
-        interest_vec = await self._get_current_interest_vector()
-        if not interest_vec:
-            # 如果没有兴趣向量（初始化失败），默认放行，依靠 LLM
-            return True, "无兴趣向量，默认放行"
-
-        # 2. 计算消息向量 (调用 Embedding API)
-        msg_vec = await self.api_client.create_embedding(message_text)
-        if not msg_vec:
-            return False, "Embedding 生成失败"
-
-        # 3. 计算相似度
-        similarity = self._cosine_similarity(interest_vec, msg_vec)
-
-        # 4. 判定
-        passed = similarity >= threshold
-
-        log_msg = (f"Sim={similarity:.2f} | Thr={threshold:.2f} "
-                   f"({state_desc}) | Interest='{self._cached_interest_text}'")
-
-        return passed, log_msg
-
-    # --- 核心组件 2：LLM 软规则 ---
     async def _check_soft_rules(self, event: OneBotEvent, threshold: float, state_desc: str,
                                 recent_history: Optional[List[Dict]] = None) -> ReactionType:
         """
-        LLM 决策层：只有通过了语义门控的消息才会到达这里。
+        第三级漏斗：LLM 动态评估。
+        此时已经排除了明确呼叫和系统事件，主要用于判断是否要在群聊中“主动插话”。
         """
-        content = event.alt_message
+        content = getattr(event, "alt_message", "")
         sender = event.source.user_id
 
         context_str = "无"
         if recent_history:
             lines = []
-            for msg in recent_history:
+            for msg in recent_history[-4:]:  # 只取最近 4 条，防止干扰
                 role = msg.get("role", "unknown")
-                text = str(msg.get("content", ""))
-                # 简单清洗与截断，防止 Token 爆炸
-                text = text.replace("\n", " ")
-                if len(text) > 60:
-                    text = text[:60] + "..."
-                lines.append(f"- {role}: {text}")
+                text = str(msg.get("content", "")).replace("\n", " ")[:100]
+                lines.append(f"[{role}]: {text}")
             context_str = "\n".join(lines)
 
-        # 将数学阈值转换为自然语言指导
         if threshold > 0.7:
-            mode_desc = "高冷模式: 你很忙或心情好，只回复极具价值、有趣或紧急的消息。忽略无聊的闲聊。"
+            mode_desc = "高冷/自闭模式：你现在压力很大或很专心，除非话题极其重要或有强烈的情绪共鸣，否则保持沉默。"
         elif threshold < 0.4:
-            mode_desc = "渴望模式: 你感到无聊或孤独，即使是普通的闲聊也应该积极回复以建立连接。"
+            mode_desc = "话痨/渴望模式：你现在精力旺盛或感到孤独，即使是普通的群聊也积极寻找话题切入点。"
         else:
-            mode_desc = "标准模式: 正常评估消息的价值。"
+            mode_desc = "标准模式：按正常逻辑判断是否接话。"
 
-        # 构造 Prompt
         prompt = f"""
-你是一个群聊中的 AI 助手 ({self.nickname})。请作为“注意力过滤器”，评估以下用户消息，决定是否需要介入。
+你是一个拟人化 AI 助手 ({self.nickname}) 的潜意识注意力门控。
+当前群聊中有人发了一条消息，你没有被提及。你需要决定是否要“主动插话”。
 
-当前状态: {mode_desc} (生理阈值: {threshold:.2f}, 状态: {state_desc})。
-当前兴趣: "{self._cached_interest_text}"。
+【当前生理状态】
+{mode_desc} (插话阻力值: {threshold:.2f}，越低越容易插话。生理影响因子: [{state_desc}])
+当前关注点: "{await self.get_current_interest_text()}"
 
-【近期上下文】
+【近期群聊上下文】
 {context_str}
 
 【当前消息】
-发送者: {sender}
-内容: "{content}"
+群员 {sender} 说: "{content}"
 
-【决策标准】
-1. REPLY (回复): 
-   - 用户在向你提问 (即使没 @ 你)。
-   - 话题与你高度相关。
-   - 检测到用户情绪激动，需要安抚。
-   - 上下文显示这是对你上一句回复的追问。
-
-2. INTERJECT (插话): 
-   - 用户在聊其他话题，但你觉得非常有趣、有梗。
-   - 你的专业知识能提供巨大帮助。
-   - 注意：不要做一个烦人的插话者，只有高质量的插话才被允许。
-
-3. OBSERVE (观察): 
-   - 闲聊、无关话题。
-   - 争吵、辱骂等负面内容。
-   - 你插不上话，或者不需要你参与的内容。
-
-请输出 JSON:
+【决策要求】
+分析该消息是否触及了你的“关注点”，或者是否有强烈的情绪需要你安抚。
+严格输出 JSON，不要任何多余内容：
 {{
-    "decision": "REPLY" | "INTERJECT" | "OBSERVE",
-    "reason": "简短理由",
-    "confidence": 0.0~1.0
+    "decision": "INTERJECT" | "OBSERVE",
+    "reason": "为什么插话或为什么无视（少于15字）",
+    "confidence": 0.0 到 1.0 之间的浮点数 (插话意愿有多强)
 }}
 """
         try:
-            # 使用 create_chat_completion 的 schema 模式强制结构化输出
-            response = await self.api_client.create_chat_completion(
-                messages=[{"role": "user", "content": prompt}],
+            response = await self.api_client.create_chat_completion_once(
+                messages=prompt,
+                system_prompt="你是一个冷酷高效的决策引擎。",
                 model=self.api_client.small_model,
                 schema={
                     "type": "object",
                     "properties": {
-                        "decision": {"type": "string", "enum": ["REPLY", "INTERJECT", "OBSERVE"]},
+                        "decision": {"type": "string", "enum": ["INTERJECT", "OBSERVE"]},
                         "reason": {"type": "string"},
                         "confidence": {"type": "number"}
                     },
@@ -244,29 +265,28 @@ class AttentionFilter:
                 }
             )
 
-            content_str = response["choices"][0]["message"]["content"]
-            result = json.loads(content_str)
+            content_str = response.get("content", "")
+            if "<think>" in content_str and "</think>" in content_str:
+                content_str = content_str.split("</think>")[-1].strip()
 
+            result = json.loads(content_str)
             decision = result.get("decision", "OBSERVE")
             confidence = result.get("confidence", 0.0)
 
-            # 决策逻辑
-            if decision == "REPLY":
-                return ReactionType.REPLY
-
             if decision == "INTERJECT":
-                # 插话需要高置信度
+                # 与动态生理阈值对抗
                 if confidence >= threshold:
+                    logger.info(
+                        f"🗣️ [Attention] 决定插话: 置信度 {confidence:.2f} >= 阻力 {threshold:.2f} ({result.get('reason')})")
                     return ReactionType.INTERJECT
                 else:
-                    logger.info(f"🛑 [Attention] 抑制插话意图 (置信度 {confidence:.2f} < {threshold})")
+                    logger.info(f"🛑 [Attention] 放弃插话: 意愿 {confidence:.2f} 不足以克服当前阻力 {threshold:.2f}")
                     return ReactionType.OBSERVE
 
             return ReactionType.OBSERVE
 
         except Exception as e:
-            logger.error(f"Attention LLM check failed: {e}", exc_info=True)
-            # 发生错误时保持安静，避免刷屏
+            logger.error(f"Attention LLM check failed: {e}")
             return ReactionType.OBSERVE
 
     async def get_current_interest_text(self) -> str:
@@ -331,28 +351,3 @@ class AttentionFilter:
             except Exception:
                 pass
         return NeuroState()
-
-    def _cosine_similarity(self, v1: List[float], v2: List[float]) -> float:
-        """手撸余弦相似度，避免 numpy 依赖"""
-        if not v1 or not v2: return 0.0
-        dot_product = sum(a * b for a, b in zip(v1, v2))
-        norm_a = math.sqrt(sum(a * a for a in v1))
-        norm_b = math.sqrt(sum(b * b for b in v2))
-        if norm_a == 0 or norm_b == 0:
-            return 0.0
-        return dot_product / (norm_a * norm_b)
-
-    def _check_hard_rules(self, event: OneBotEvent) -> Optional[ReactionType]:
-        # 1. @我
-        if self.bot_self_id and f"[CQ:at,qq={self.bot_self_id}]" in event.alt_message:
-            return ReactionType.REPLY
-
-        # 2. 呼叫名字
-        if self.nickname and event.alt_message.strip().startswith(self.nickname):
-            return ReactionType.REPLY
-
-        # # 3. 私聊 (可选，视配置而定)
-        # if event.detail_type == DetailType.PRIVATE:
-        #     return ReactionType.REPLY
-
-        return None

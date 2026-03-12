@@ -41,7 +41,6 @@ async def send_message(
     # ==========================================
     # 1. 情绪碎片化处理 (Fragmentation)
     # ==========================================
-    fragments = []
     try:
         # 延迟导入我们上一阶段编写的 OutputFragmenter
         from core.io.fragmentation import OutputFragmenter
@@ -164,7 +163,7 @@ async def wait(
             # 如果解析出的时间没有时区，且当前是 Awareness 的，需处理 (这里简化，假设本地时间)
             if run_date < datetime.datetime.now():
                 return f"错误: 目标时间 {until} 已经是过去式了。"
-        except Exception as e:
+        except Exception:
             return f"错误: 无法解析时间字符串 '{until}'。请使用 ISO 格式 (YYYY-MM-DD HH:MM:SS)。"
 
     elif duration is not None:

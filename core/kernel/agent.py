@@ -383,6 +383,7 @@ class AutonomousAgent:
         logger.info("任务调度器已启动")
 
         # 初始化 Social DB
+        logger.info("正在加载社交系统...")
         await self.user_manager.initialize()
 
         # 异步加载工具 (包括 MCP)
@@ -390,38 +391,42 @@ class AutonomousAgent:
         await self.tool_manager.initialize()
 
         # 初始化边缘系统数据库
+        logger.info("正在加载边缘系统...")
         await self.limbic.initialize()
 
         # 1. 注入初始系统上下文
         # 获取当前兴趣
+        logger.info("正在加载兴趣...")
         initial_interest = await self.attention.get_current_interest_text()
 
         # 获取初始生理状态
+        logger.info("正在加载生理状态...")
         initial_state = await self.limbic.get_state()
 
-        embodiment_narrative = await self.limbic.embodiment.get_status_narrative()
+        logger.info("正在加载躯体感知...")
+        embodiment_narrative = self.limbic.embodiment.get_status_narrative()
 
         # 生成完整 Prompt
+        logger.info("正在生成Prompt...")
         system_prompt = self.prompt_manager.get_system_prompt(
             neuro_state=initial_state,
             interest_context=initial_interest,
             embodiment_narrative=embodiment_narrative,
         )
-        self.history.append({"role": "system", "content": system_prompt})
 
         # 2. 尝试恢复核心状态
+        logger.info("正在检测恢复...")
         has_state = await self.load_state()
 
         if not has_state:
             # 首次启动：注入基础 Prompt 和启动消息
+            logger.info("开始执行全新启动")
+            self.history.clear()
             self.history.append({"role": "system", "content": system_prompt})
             self.history.append({"role": "user", "content": "系统启动完成。"})
         else:
             # 恢复启动：更新最新的 system prompt（防止代码修改没生效）
-            if self.history and self.history[0].get("role") == "system":
-                self.history[0]["content"] = system_prompt
-            else:
-                self.history.insert(0, {"role": "system", "content": system_prompt})
+            self.history[0] = {"role": "system", "content": system_prompt}
 
             # 向 Agent 发送断点恢复提示，让它知道刚刚发生了重启
             self.history.append({
@@ -433,6 +438,7 @@ class AutonomousAgent:
         asyncio.create_task(self.hippocampus.start())
         asyncio.create_task(self.limbic.start())
 
+        logger.info("Agent启动完成")
         while True:
             try:
                 # --- A. 感知阶段 (Perception) ---
@@ -497,7 +503,7 @@ class AutonomousAgent:
                 current_interactor = self.scratchpad.get("current_interactor")
                 current_interest = await self.attention.get_current_interest_text()
 
-                embodiment_narrative = await self.limbic.embodiment.get_status_narrative()
+                embodiment_narrative = self.limbic.embodiment.get_status_narrative()
 
                 # 2. 生成带有状态描述的 Prompt
                 system_prompt_base = self.prompt_manager.get_system_prompt(
@@ -546,10 +552,7 @@ class AutonomousAgent:
                 )
 
                 # 更新历史记录中的 System Prompt
-                if self.history[0]["role"] == "system":
-                    self.history[0]["content"] = final_system_prompt
-                else:
-                    self.history.insert(0, {"role": "system", "content": final_system_prompt})
+                self.history[0] = {"role": "system", "content": final_system_prompt}
 
                 try:
                     async with aiofiles.open("data/messages_in_memory.json", "w", encoding="utf-8") as f:
