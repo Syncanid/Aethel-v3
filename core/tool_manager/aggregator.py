@@ -33,6 +33,10 @@ class ToolManager:
         self._mcp_clients: Dict[str, MCPClient] = {}
         self._schemas: List[Dict[str, Any]] = []
 
+        self._base_local_tools: Dict[str, Any] = {}
+        self._base_schemas: List[Dict[str, Any]] = []
+        self._active_skill: Optional[str] = None
+
         # 自愈配置
         self.max_self_heal_attempts = 1
 
@@ -67,6 +71,10 @@ class ToolManager:
                 except Exception as e:
                     logger.error(f"MCP服务器 {name} 加载失败: {e}", exc_info=True)
 
+        self._base_local_tools = self._local_tools.copy()
+        self._base_schemas = list(self._schemas)
+        logger.info(f"💾 工具环境基线已保存，共 {len(self._base_local_tools)} 个本地工具。")
+
     def _load_local_tools(self):
         """扫描 tools 目录并注册"""
         if not os.path.exists(self.tools_dir):
@@ -93,7 +101,7 @@ class ToolManager:
             props = schema["function"]["parameters"]["properties"]
             required = schema["function"]["parameters"]["required"]
 
-            for dep in self.dependency_map.keys():
+            for dep in list(self.dependency_map.keys()):
                 if dep in props:
                     del props[dep]
                 if dep in required:
@@ -104,6 +112,64 @@ class ToolManager:
             logger.debug(f"本地工具已注册: {tool_name}")
 
         clear_pending()
+
+    def mount_skill_tools(self, skill_name: str):
+        """动态挂载特定技能专属的代码工具"""
+        self.unmount_skill_tools()  # 先清理上一任，确保环境干净
+
+        skill_tools_path = os.path.join("data", "skills", skill_name, "tools.py")
+        if not os.path.exists(skill_tools_path):
+            return  # 没有专属代码工具，直接返回
+
+        module_name = f"skill_tools_{skill_name.replace('-', '_')}"
+
+        try:
+            # 动态加载绝对路径下的 python 模块
+            spec = importlib.util.spec_from_file_location(module_name, skill_tools_path)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            spec.loader.exec_module(module)
+
+            # 捕获该 tools.py 中通过 @register 注册的专属函数
+            pending = get_pending_functions()
+            mounted_count = 0
+            for func, name in pending:
+                tool_name = name or func.__name__
+                schema = SchemaGenerator.get_function_schema(func, tool_name)
+
+                # 处理依赖注入剔除
+                props = schema["function"]["parameters"]["properties"]
+                required = schema["function"]["parameters"]["required"]
+                for dep in list(self.dependency_map.keys()):
+                    if dep in props: del props[dep]
+                    if dep in required: required.remove(dep)
+
+                # 将专属工具塞入当前 S2 引擎
+                self._local_tools[tool_name] = func
+                self._schemas.append(schema)
+                mounted_count += 1
+                logger.debug(f"🔧 已动态挂载技能专属工具: {tool_name}")
+
+            clear_pending()
+            self._active_skill = skill_name
+            if mounted_count > 0:
+                logger.info(f"🧩 技能 [{skill_name}] 挂载完毕，共载入 {mounted_count} 个专属工具。")
+
+        except Exception as e:
+            logger.error(f"挂载技能 {skill_name} 专属工具失败: {e}", exc_info=True)
+
+    def unmount_skill_tools(self):
+        """卸载当前技能专属工具，恢复到 System 2 基础环境"""
+        if self._active_skill:
+            self._local_tools = self._base_local_tools.copy()
+            self._schemas = list(self._base_schemas)
+
+            module_name = f"skill_tools_{self._active_skill.replace('-', '_')}"
+            if module_name in sys.modules:
+                del sys.modules[module_name]  # 从内存剔除模块
+
+            logger.info(f"🧹 技能 [{self._active_skill}] 专属工具已卸载，S2 环境已复原。")
+            self._active_skill = None
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return self._schemas
@@ -317,3 +383,7 @@ class ToolManager:
         except Exception as e:
             logger.error(f"热重载失败: {e}", exc_info=True)
             return f"重载失败: {str(e)}"
+
+    @property
+    def active_skill(self):
+        return self._active_skill

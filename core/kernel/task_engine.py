@@ -577,6 +577,8 @@ class TaskEngine:
             except Exception as e:
                 logger.error(f"任务归档失败: {e}")
 
+            self.tool_manager.unmount_skill_tools()
+
             self.is_busy = False
             await self.save_state()  # 确保清理现场
             self._running_task_coro = None

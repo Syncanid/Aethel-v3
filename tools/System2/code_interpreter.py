@@ -7,6 +7,7 @@ import logging
 import traceback
 from typing import Dict, Any, Optional
 
+from core.tool_manager.aggregator import ToolManager
 from core.tool_manager.registry import register
 
 logger = logging.getLogger(__name__)
@@ -50,14 +51,40 @@ class SecurityError(Exception):
 
 
 @register()
+async def inspect_system_dependencies(tool_manager=None) -> str:
+    """
+    [元编程辅助工具] 查看当前系统向工具和代码沙盒中注入的底层依赖项 (Dependency Map)。
+    当你准备编写新的技能代码 (tools.py) 时，调用此工具可以了解你能直接使用哪些系统级对象（如数据库、API客户端、事件总线等）。
+    """
+    if not tool_manager:
+        return "Error: ToolManager is not available."
+
+    deps = tool_manager.dependency_map
+    result = ["**当前系统可用的底层依赖项注入列表**：",
+              "你可以直接在自定义工具函数的参数中声明这些名字，系统会自动注入；或者在 `run_python_code` 中直接作为全局变量访问它们。",
+              "---"]
+
+    for name, obj in deps.items():
+        obj_type = type(obj).__name__
+        module = getattr(type(obj), '__module__', 'builtins')
+        result.append(f"- **`{name}`**: Type `<{module}.{obj_type}>`")
+
+    result.append("---")
+
+    return "\n".join(result)
+
+
+@register()
 async def run_python_code(
         code: str,
         timeout: Optional[int] = 30,
-        reset_session: Optional[bool] = False
+        reset_session: Optional[bool] = False,
+        tool_manager: ToolManager = None
 ) -> Dict[str, Any]:
     """
     [Omnipotent] 执行 Python 代码的沙箱解释器。支持变量状态保持 (REPL 模式)。
     可用于：复杂数学计算、数据处理、文本分析、生成算法等。
+    注意：底层的 dependency_map (如 config, database, agent_state 等) 已经被隐式注入为全局变量，可直接在代码中使用。
 
     Args:
         code: 要执行的 Python 代码字符串。
@@ -80,6 +107,10 @@ async def run_python_code(
             "__name__": "__main__",
         })
         logger.info("Code Interpreter session reset.")
+
+    if tool_manager:
+        # 将最新的系统依赖 (config, event_bus, agent_state 等) 更新到解释器全局变量中
+        _INTERPRETER_GLOBALS.update(tool_manager.dependency_map)
 
     # 1. 代码预处理与安全检查
     code = code.strip()

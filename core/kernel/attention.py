@@ -233,11 +233,11 @@ class AttentionFilter:
 {mode_desc} (插话阻力值: {threshold:.2f}，越低越容易插话。生理影响因子: [{state_desc}])
 当前关注点: "{await self.get_current_interest_text()}"
 
-【近期群聊上下文】
+【近期上下文】
 {context_str}
 
 【当前消息】
-群员 {sender} 说: "{content}"
+{sender} 说: "{content}"
 
 【决策要求】
 分析该消息是否触及了你的“关注点”，或者是否有强烈的情绪需要你安抚。

@@ -1,4 +1,7 @@
 # System2Tools/s2_interact.py
+from typing import Optional
+
+from core.io.event_bus import EventBus
 from core.io.event_schema import OneBotEvent, EventType, DetailType, TaskPayload, EventSource
 from core.tool_manager.registry import register
 
@@ -6,8 +9,8 @@ from core.tool_manager.registry import register
 @register()
 async def report_task_progress(
         progress_message: str,
-        event_bus=None,
-        agent_state=None
+        event_bus: EventBus = None,
+        agent_state: Optional[dict] = None
 ) -> str:
     """
     向 System 1 主动汇报当前任务的关键进度。
@@ -46,8 +49,8 @@ async def report_task_progress(
 @register()
 async def ask_system1_for_help(
         question: str,
-        event_bus=None,
-        agent_state=None
+        event_bus: EventBus = None,
+        agent_state: Optional[dict] = None
 ) -> str:
     """
     当执行任务时遇到缺失的关键信息（如需要验证码、密码、确认选项），使用此工具暂停当前思考，向系统1求助。

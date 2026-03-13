@@ -12,6 +12,7 @@ import yaml
 from core.gui.monitor_registry import monitor_registry
 from core.infrastructure.config_loader import Config
 from core.limbic.arch import NeuroState
+from core.tool_manager.skill_registry import global_skill_registry
 
 logger = logging.getLogger(__name__)
 
@@ -344,6 +345,7 @@ prime_directives:
         memory_block = self._get_memory_context(memory_context)
         mimicry_block = self._get_social_mimicry_context()
         embodiment_block = f"\n<Embodiment_Signal>\n{embodiment_narrative}\n</Embodiment_Signal>\n"
+        skill_registry = global_skill_registry.get_s1_prompt_injection()
 
         monitor_registry.register_text_source(
             "生理指标", "注入",
@@ -361,5 +363,6 @@ prime_directives:
             # interest_block,
             social_block,
             mimicry_block,
-            memory_block
+            memory_block,
+            skill_registry,
         ])

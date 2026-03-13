@@ -4,6 +4,7 @@ import os
 import time
 from typing import Optional
 
+from core.infrastructure.api_client import GenericAPIClient
 from core.io.event_bus import EventBus
 from core.io.event_schema import OneBotEvent, EventType, DetailType, TaskPayload, EventSource
 from core.tool_manager.registry import register
@@ -53,7 +54,7 @@ async def dispatch_background_task(
 async def send_info_to_running_task(
         task_id: str,
         info: str,
-        event_bus=None,
+        event_bus: EventBus = None,
 ) -> str:
     """
     向正在运行的后台任务发送补充信息。
@@ -84,7 +85,7 @@ async def send_info_to_running_task(
 async def query_task_history(
         task_id: str,
         user_question: str,
-        api_client=None
+        api_client: GenericAPIClient = None
 ) -> str:
     """
     查询已完成的历史任务。因为记录可能很长，会自动通过 LLM 提取关键信息。
@@ -135,7 +136,7 @@ async def query_task_history(
 @register()
 async def cancel_background_task(
         task_id: str,
-        event_bus=None,
+        event_bus: EventBus = None,
 ) -> str:
     """
     当用户明确表示要取消、终止或放弃正在后台执行的任务时，调用此工具。
@@ -154,3 +155,44 @@ async def cancel_background_task(
     )
     event_bus.publish_event(event)
     return f"已向后台发送取消指令，任务 {task_id} 即将终止。"
+
+
+@register()
+async def dispatch_skill_task(
+        skill_name: str,
+        parameters: Optional[dict] = None,
+        event_bus: EventBus = None,
+) -> str:
+    """
+    当用户的需求完美匹配你所拥有的某个特定技能(Skill)时，优先调用此工具。
+    :param skill_name: 技能的唯一名称
+    :param parameters: 该技能要求的参数字典
+    """
+    import time
+    if parameters is None:
+        parameters = {}
+
+    task_id = f"task_{int(time.time())}"
+
+    # 巧妙利用 parameters 传递系统保留字，告诉 S2 这是个特殊技能任务
+    parameters["__skill_name__"] = skill_name
+
+    payload = TaskPayload(
+        task_id=task_id,
+        description=f"执行专业技能：{skill_name}",
+        parameters=parameters
+    )
+
+    source = EventSource(platform="internal")
+
+    # 发送内部事件到 EventBus，唤醒后台 Task Engine
+    event = OneBotEvent(
+        type=EventType.TASK,
+        detail_type=DetailType.TASK_DISPATCH,
+        source=source,
+        extra={"task_payload": payload.model_dump()}
+    )
+
+    event_bus.publish_event(event)
+
+    return f"技能 [{skill_name}] 已成功派发至后台长思考引擎开始执行 (任务ID: {task_id})。"

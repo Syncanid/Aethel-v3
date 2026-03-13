@@ -28,14 +28,14 @@ def _get_proxies(config: Config):
 async def web_search(
         config: Config,
         query: str,
-        safesearch: Optional[bool] = True,
+        safe_search: Optional[bool] = True,
 ) -> str:
     """
     [Network] 使用 SearXNG 引擎进行联网搜索。
 
     Args:
         query: 搜索关键词。
-        safesearch: 是否启用安全搜索（默认开启）。
+        safe_search: 是否启用安全搜索（默认开启）。
     """
     base_url = config.get("searxng_base_url")
     if not base_url:
@@ -46,7 +46,7 @@ async def web_search(
         "q": query,
         "format": "json",
         "language": "zh-CN",
-        "safesearch": 1 if safesearch else 0
+        "safesearch": 1 if safe_search else 0
     }
 
     try:

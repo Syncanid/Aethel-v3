@@ -22,7 +22,7 @@ async def send_message(
         target_id: str,
         target_type: Literal["private", "group", "channel"],
         event_bus: EventBus = None,
-        agent: Any = None,
+        agent: AutonomousAgent = None,
 ) -> str:
     """
     发送消息。支持指定发送目标（私聊/群组）。
@@ -119,6 +119,7 @@ async def send_message(
     # 循环走完，说明所有碎片都发送成功
     return final_status
 
+
 # --- 内部辅助函数：发送唤醒事件 ---
 async def _dispatch_wake_up(event_bus: EventBus, reason: str):
     """调度器回调：发送唤醒事件"""
@@ -196,7 +197,7 @@ async def wait(
 
 @register()
 async def wait_forever(
-        agent: Any = None,
+        agent: AutonomousAgent = None,
         event_bus: EventBus = None,
         reason: Optional[str] = None,
 ) -> Optional[str]:
