@@ -37,22 +37,23 @@ async def send_message(
         platform: str,
         target_id: str,
         target_type: Literal["private", "group", "channel"],
-        wait_duration: Optional[float] = None,
+        wait_minutes: Optional[float] = None,
         event_bus: EventBus = None,
         agent: AutonomousAgent = None,
         scheduler: AsyncIOScheduler = None,
+        fragmenter: Any = None,
 ) -> str:
     """
     发送消息。支持指定发送目标（私聊/群组）。
     发送消息之前必须获取基本信息（平台和用户ID/群组ID）。
-    如果你希望在发送完这条消息后立刻进入等待/休眠状态，请填写 wait_duration 参数。
+    如果你希望在发送完这条消息后立刻进入等待/休眠状态，请填写 wait_minutes 参数。
 
     Args:
         message: 消息内容。
         platform: 目标平台（PUID的前半部分）。
         target_id: 目标user_id或group_id（PUID的后半部分）。
         target_type: 消息类型 ('private', 'group', 'channel')。
-        wait_duration: (可选) 发送后等待的分钟数，为空则不等待。
+        wait_minutes: (可选) 发送后等待的分钟数，小于等于0或为空则不等待。
     """
 
     if not target_id:
@@ -67,7 +68,7 @@ async def send_message(
         if agent and hasattr(agent, "limbic"):
             state = await agent.limbic.get_state()
             # 将 LLM 生成的完整文本切碎，并附带计算好的延迟时间
-            fragments = OutputFragmenter.fragment(message, state)
+            fragments = fragmenter.fragment(message, state)
         else:
             # 如果获取不到状态，降级为整段发送，无延迟
             fragments = [(message, 0.0)]
@@ -133,18 +134,15 @@ async def send_message(
             return f"系统异常: 发送过程中发生错误 - {str(e)}"
 
     # 3. 发送成功后的等待逻辑处理
-    if wait_duration is not None:
+    if wait_minutes is not None and wait_minutes > 0:
         if not scheduler:
             return f"{final_status}。但警告：调度器未初始化，系统未能进入等待状态。"
-
-        if wait_duration <= 0:
-            return f"{final_status}。但无法等待: 等待时长必须大于 0。"
 
         # 添加调度任务
         job = scheduler.add_job(
             _dispatch_wake_up,
             'date',
-            run_date=datetime.datetime.now() + datetime.timedelta(minutes=wait_duration),
+            run_date=datetime.datetime.now() + datetime.timedelta(minutes=wait_minutes),
             args=[event_bus, "等待超时"]
         )
 

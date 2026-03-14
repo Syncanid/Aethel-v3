@@ -14,6 +14,7 @@ from core.infrastructure.config_loader import Config
 from core.infrastructure.database import Database
 from core.io.event_bus import EventBus
 from core.io.event_schema import OneBotEvent, Action, DetailType, EventType
+from core.io.fragmentation import OutputFragmenter
 from core.io.middleware import MiddlewareManager
 from core.kernel.attention import AttentionFilter, ReactionType
 from core.kernel.prompt import PromptManager
@@ -86,6 +87,10 @@ class AutonomousAgent:
         # 初始化无限上下文管理器
         self.context_manager = InfiniteContextManager(config, self.api_client)
 
+        # 提取角色卡配置并实例化输出分段器
+        role_config = getattr(self.prompt_manager, "role_data", {})
+        self.fragmenter = OutputFragmenter(role_config)
+
         # 记录唤醒任务的 ID
         self.wakeup_job_id = None
 
@@ -97,6 +102,7 @@ class AutonomousAgent:
         self.tool_manager.add_dependency("scheduler", self.scheduler)
         self.tool_manager.add_dependency("limbic", self.limbic)
         self.tool_manager.add_dependency("user_manager", self.user_manager)
+        self.tool_manager.add_dependency("fragmenter", self.fragmenter)
 
         # 中间件系统
         self.middleware = MiddlewareManager()

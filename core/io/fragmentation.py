@@ -8,13 +8,26 @@ from core.limbic.arch import NeuroState
 
 class OutputFragmenter:
     """
-    消息碎片化处理器：根据边缘系统的状态，打碎大段文本，模拟人类的发送习惯。
+    配置驱动的消息碎片化处理器：
+    基于角色卡设定的语速、碎片化倾向，以及边缘系统的实时状态，智能切割文本。
     """
 
-    @staticmethod
-    def fragment(text: str, state: NeuroState) -> List[Tuple[str, float]]:
+    def __init__(self, role_config: dict = None):
         """
-        将完整回复拆分为碎片。
+        初始化时注入角色卡配置。
+        如果在框架层面不方便传递实例，也可以每次调用 fragment 时将 config 作为参数传入。
+        """
+        constraints = role_config.get('behavior_constraints', {})
+        self.config = constraints.get('fragmentation', {})
+
+        # 从角色卡读取碎片化基础属性，如果没有则使用默认值
+        self.base_typing_speed = self.config.get('typing_speed_per_char', 0.08)  # 默认打字速度：每字 0.08 秒
+        self.allow_micro_fragments = self.config.get('allow_micro_fragments', False)  # 是否允许逗号级的极度碎嘴
+        self.merge_actions = self.config.get('merge_actions', True)  # 是否强制将 (动作) 绑定到上一句话
+
+    def fragment(self, text: str, state: NeuroState = None) -> List[Tuple[str, float]]:
+        """
+        将完整回复拆分为碎片，并计算动态延迟。
         :return: List[Tuple[消息片段, 发送此片段前的延迟秒数]]
         """
         # 清理多余空行
@@ -22,46 +35,89 @@ class OutputFragmenter:
         if not text:
             return []
 
-        # 获取状态指标
-        is_excited = state.curiosity > 0.7 or state.social_need > 0.8  # 极度好奇或极度想聊天
-        is_stressed = state.survival_pressure > 0.7  # 高压/服务器卡顿/报错
-        is_exhausted = state.cognitive_energy < 0.3 or (
-                    state.curiosity < 0.3 and state.social_need < 0.3)  # 脑力枯竭或极度内耗无聊
+        # 1. 智能语义切分（防 RP 动作截断）
+        fragments = self._smart_split(text)
 
-        fragments = []
+        # 2. 计算边缘系统（状态）带来的语速倍率
+        speed_multiplier = 1.0
+        if state:
+            # 高压/紧急情况：打字变急促
+            if getattr(state, 'survival_pressure', 0) > 0.7:
+                speed_multiplier *= 0.6
+                if self.allow_micro_fragments:
+                    fragments = self._micro_split(fragments)
 
-        if is_excited or is_stressed:
-            # 【激动/暴躁模式】：极度碎片化，按逗号和句号切分，甚至不发标点
-            raw_parts = re.split(r'([。？！\n，,])', text)
+            # 脑力耗尽/抑郁：打字变极慢
+            elif getattr(state, 'cognitive_energy', 1.0) < 0.3:
+                speed_multiplier *= 2.0
 
-            buffer = ""
-            for part in raw_parts:
-                if re.match(r'[。？！\n，,]', part):
-                    buffer += part
-                    # 暴躁/激动时，经常一句话还没说完就发出去
-                    if len(buffer.strip()) > 2:
-                        fragments.append(buffer.strip())
-                        buffer = ""
-                else:
-                    buffer += part
-            if buffer.strip():
-                fragments.append(buffer.strip())
+            # 极度想交流：回复变快
+            elif getattr(state, 'social_need', 0) > 0.8:
+                speed_multiplier *= 0.8
 
-            # 分配极短的延迟时间，模拟急促的打字连发（压力大时比兴奋时打字更急促）
-            delay_min = 0.3 if is_stressed else 0.5
-            delay_max = 1.0 if is_stressed else 1.5
-            return [(frag, random.uniform(delay_min, delay_max)) for frag in fragments if frag]
+        # 3. 动态延迟计算 (基于字数)
+        result = []
+        for i, frag in enumerate(fragments):
+            frag = frag.strip()
+            if not frag:
+                continue
 
-        elif is_exhausted:
-            # 【疲惫/抑郁模式】：按完整句子切分，但延迟极高，仿佛打字很慢、不想说话
-            sentences = re.split(r'(?<=[。？！\n])\s*', text)
-            sentences = [s for s in sentences if s.strip()]
+            char_count = len(frag)
 
-            # 发送前迟疑很久
-            return [(s, random.uniform(3.0, 6.0)) for s in sentences]
+            if i == 0:
+                final_delay = 0.0
+            else:
+                calc_delay = char_count * self.base_typing_speed * speed_multiplier
+                # 增加 10%~20% 的拟人随机波动
+                final_delay = max(0.1, calc_delay * random.uniform(0.9, 1.2))
 
-        else:
-            # 【平静模式】：不打碎，或者只按段落(换行)打碎
-            paragraphs = text.split('\n')
-            paragraphs = [p for p in paragraphs if p.strip()]
-            return [(p, random.uniform(1.0, 2.5)) for p in paragraphs]
+            result.append((frag, round(final_delay, 2)))
+
+        return result
+
+    def _smart_split(self, text: str) -> List[str]:
+        """
+        智能切片：按换行符切分，但如果某一行是纯动作描写，则将其合并到上一句。
+        """
+        raw_lines = [line.strip() for line in text.split('\n') if line.strip()]
+        if not self.merge_actions:
+            return raw_lines
+
+        merged_lines = []
+        for line in raw_lines:
+            # 正则匹配：判断整行是否是被括号包裹的动作/心理活动 (支持各种全半角括号)
+            is_pure_action = bool(re.match(r'^[\W]*[(（\[【].*[)）\]】][\W]*$', line))
+
+            if is_pure_action and merged_lines:
+                # 如果这是一行纯动作，且前面有话，绝对不能单独发出去，拼接到上一句末尾
+                merged_lines[-1] += f" {line}"
+            else:
+                merged_lines.append(line)
+
+        return merged_lines
+
+    def _micro_split(self, fragments: List[str]) -> List[str]:
+        """
+        针对某些角色在激动时的“微切分”（按逗号/句号切分）。
+        同时确保不会切碎括号内的内容。
+        """
+        micro_frags = []
+        for frag in fragments:
+            # 简易保护：如果当前片段包含括号动作，为了不破坏结构，直接不切
+            if re.search(r'[(（\[【]', frag):
+                micro_frags.append(frag)
+            else:
+                # 仅对纯文本按句号、逗号等进行激进切片
+                parts = re.split(r'([。？！，,])', frag)
+                buffer = ""
+                for part in parts:
+                    if re.match(r'[。？！，,]', part):
+                        buffer += part
+                        if len(buffer.strip()) > 2:
+                            micro_frags.append(buffer.strip())
+                            buffer = ""
+                    else:
+                        buffer += part
+                if buffer.strip():
+                    micro_frags.append(buffer.strip())
+        return [f for f in micro_frags if f]
