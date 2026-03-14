@@ -10,8 +10,8 @@ class NeuroState:
     生理状态
     """
     # 核心内驱力 (0.0 ~ 1.0，随时间或事件累积)
-    social_need: float = 0.0  # 社交渴望 (随时间增加)
-    curiosity: float = 0.0  # 探索欲 (闲置时增加)
+    social_need: float = 0.5  # 社交渴望 (随时间增加)
+    curiosity: float = 0.5  # 探索欲 (闲置时增加)
     survival_pressure: float = 0.0  # 生存压力 (由服务器报错、高负载直接驱动)
 
     # 物理稳态

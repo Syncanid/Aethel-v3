@@ -147,7 +147,7 @@ SCHEMA_SQL = {
                    """,
     "memory_fts": """
         CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
-            doc_id UNINDEXED, -- 仅存储不建立索引
+            doc_id UNINDEXED,
             content,
             type UNINDEXED,
             puid UNINDEXED
@@ -183,7 +183,28 @@ SCHEMA_SQL = {
                           INSERT INTO memory_fts(doc_id, content, type, puid)
                           VALUES (new.doc_id, new.content, new.type, new.puid);
                           END;
-                          """
+                          """,
+    "daemon_scripts": """
+                      CREATE TABLE IF NOT EXISTS daemon_scripts
+                      (
+                          name
+                          TEXT
+                          PRIMARY
+                          KEY,
+                          code
+                          TEXT
+                          NOT
+                          NULL,
+                          status
+                          TEXT
+                          DEFAULT
+                          'stopped',
+                          created_at
+                          REAL,
+                          updated_at
+                          REAL
+                      )
+                      """
 }
 
 

@@ -295,7 +295,13 @@ class TaskEngine:
         self._current_task_params = params
         self._current_task_source = source
 
-        final_result = "Unknown"
+        self.task_status = {
+            "finished": False,
+            "final_result": "Unknown",
+            "status": "Unknown",
+            "skill": False
+        }
+
         try:
             if not is_resume:
                 # 1. 全新启动：重置并注册任务
@@ -469,9 +475,7 @@ class TaskEngine:
 
                         tool_execution_queue.append({"name": name, "args": args, "id": t_id})
 
-                # 3. 执行工具与跳出机制
-                is_finished = False
-
+                # 3. 执行工具
                 if tool_execution_queue:
                     self.last_response_used_tools = True
                     for task in tool_execution_queue:
@@ -484,22 +488,6 @@ class TaskEngine:
                                 args = json.loads(args)
                             except json.JSONDecodeError:
                                 args = {}
-
-                        if name == "conclude_task":
-                            final_result = args.get("result", "未提供结论")
-                            status = args.get("status", "success")
-                            logger.info(f"✅ [System 2] 任务主动宣布结束。结论: {final_result[:50]}...")
-
-                            # 回填历史保证格式完备
-                            if t_id:
-                                self.history.append({"role": "tool", "tool_call_id": t_id, "name": name,
-                                                     "content": f"Task Concluded with status: {status}"})
-                            else:
-                                self.history.append(
-                                    {"role": "tool", "name": name, "content": f"Task Concluded with status: {status}"})
-
-                            is_finished = True
-                            break
 
                         # 正常工具执行
                         try:
@@ -537,19 +525,7 @@ class TaskEngine:
 
                 await self.save_state()
 
-                if is_finished:
-                    await global_task_registry.complete_task(task_id, final_result)
-
-                    # 发送回 EventBus 唤醒 S1
-                    complete_event = OneBotEvent(
-                        type=EventType.TASK,
-                        detail_type=DetailType.TASK_COMPLETE,
-                        source=source,
-                        extra={"task_payload": {"task_id": task_id, "result": final_result, "description": description}}
-                    )
-                    self.event_bus.publish_event(complete_event)
-                    self.is_busy = False
-                    await self.save_state()  # 任务结束，清空繁忙状态
+                if self.task_status["finished"]:
                     break
 
         except asyncio.CancelledError:
@@ -558,6 +534,20 @@ class TaskEngine:
             final_result = f"System Crash: {str(e)}"
             logger.error(f"❌ [System 2] 任务执行崩溃: {e}", exc_info=True)
             await global_task_registry.complete_task(task_id, final_result)
+
+            complete_event = OneBotEvent(
+                type=EventType.TASK,
+                detail_type=DetailType.TASK_COMPLETE,
+                source=source,
+                extra={"task_payload": {
+                    "task_id": task_id,
+                    "result": final_result,
+                    "status": "failure",
+                    "description": description
+                }}
+            )
+            self.event_bus.publish_event(complete_event)
+            await self.save_state()
         finally:
             # 任务结束，打包并持久化黑匣子记录
             record_dir = "data/task_records"
@@ -568,15 +558,39 @@ class TaskEngine:
                 "goal": description,
                 "parameters": params,
                 "final_scratchpad": self.scratchpad,
-                "final_result": final_result,
+                "final_result": self.task_status["final_result"],
                 "execution_history": self.history
             }
 
             try:
+                await global_task_registry.complete_task(task_id, self.task_status["final_result"])
+
+                # 发送回 EventBus 唤醒 S1
+                complete_event = OneBotEvent(
+                    type=EventType.TASK,
+                    detail_type=DetailType.TASK_COMPLETE,
+                    source=source,
+                    extra={"task_payload": {
+                        "task_id": task_id,
+                        "result": self.task_status["final_result"],
+                        "status": self.task_status["status"],
+                        "description": description
+                    }}
+                )
+                self.event_bus.publish_event(complete_event)
+
                 filepath = os.path.join(record_dir, f"{task_id}.json")
                 async with aiofiles.open(filepath, "w", encoding="utf-8") as f:
                     await f.write(json.dumps(record_data, ensure_ascii=False, indent=2))
                 logger.info(f"📦 [System 2] 任务 {task_id} 历史记录已打包归档至: {filepath}")
+
+                if self.task_status["status"] == "success" and self.task_status["skill"]:
+                    logger.info("🧬 [System 2] 任务成功且要求演化，正在发布内部提取 Action...")
+                    self.event_bus.publish_action(Action(
+                        action="extract_skill",
+                        params={"task_id": task_id},
+                        target_platform="internal"
+                    ))
             except Exception as e:
                 logger.error(f"任务归档失败: {e}")
 
@@ -594,30 +608,6 @@ class TaskEngine:
         tools = self.tool_manager.get_tool_schemas()
         if tools is None:
             tools = []
-
-        tools.append({
-            "type": "function",
-            "function": {
-                "name": "conclude_task",
-                "description": "当任务已经得出最终结论，或者确认彻底失败无法继续时，必须调用此工具来结束任务进程。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "result": {
-                            "type": "string",
-                            "description": "任务的最终执行结果、结论或失败原因汇总。此内容将直接作为最终报告。"
-                        },
-                        "status": {
-                            "type": "string",
-                            "enum": ["success", "failure"],
-                            "description": "任务最终定性状态。"
-                        }
-                    },
-                    "required": ["result", "status"],
-                    "additionalProperties": False
-                }
-            }
-        })
 
         use_schema_tools = self.config.get("llm.use_schema_tool_calls", True)
         arg_mode = self.config.get("llm.tool_call_arg_mode", "object")
@@ -698,3 +688,7 @@ class TaskEngine:
             tool_choice="auto" if use_schema_tools else ("auto" if self.last_response_used_tools else "required")
         )
         return response["choices"][0]["message"]
+
+    @property
+    def current_task_id(self):
+        return self._current_task_id

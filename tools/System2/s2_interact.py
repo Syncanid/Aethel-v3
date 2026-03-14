@@ -1,9 +1,13 @@
 # System2Tools/s2_interact.py
+import logging
 from typing import Optional
 
 from core.io.event_bus import EventBus
 from core.io.event_schema import OneBotEvent, EventType, DetailType, TaskPayload, EventSource
+from core.kernel.task_engine import TaskEngine
 from core.tool_manager.registry import register
+
+logger = logging.getLogger(__name__)
 
 
 @register()
@@ -84,3 +88,29 @@ async def ask_system1_for_help(
 
     # 返回给 S2 LLM 的观测结果，引导它挂起
     return "已将问题发送给 System 1，请调用 `wait` 工具挂起自己，等待 System 1 通过 TASK_UPDATE 将用户的答案传回给你。"
+
+
+@register()
+async def conclude_task(
+        result: str,
+        status: str,
+        generate_skill: bool = False,
+        task_engine: TaskEngine = None
+) -> str:
+    """
+    当任务已经得出最终结论，或者确认彻底失败无法继续时，必须调用此工具来结束任务进程。
+
+    :param result: 任务的最终执行结果、结论或失败原因汇总。此内容将直接作为最终报告。
+    :param status: 任务最终定性状态，必须是 "success" 或 "failure"。
+    :param generate_skill: 如果本次任务成功，并且你认为这次探索出了一套高价值、可复用的工作流或代码，将其设为 True，系统会在后台自动总结并固化为一个标准 Skill。
+    """
+    task_engine.task_status = {
+        "finished": True,
+        "final_result": result,
+        "status": status,
+        "skill": generate_skill
+    }
+
+    logger.info(f"✅ [System 2] 任务主动宣布结束。结论: {result[:50]}...")
+
+    return f"任务结束信号已发送。结论：{result}。是否触发技能演化：{generate_skill}。"

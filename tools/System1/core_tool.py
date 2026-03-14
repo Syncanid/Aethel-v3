@@ -15,32 +15,50 @@ from core.tool_manager.registry import register
 logger = logging.getLogger(__name__)
 
 
+# --- 内部辅助函数：发送唤醒事件 ---
+async def _dispatch_wake_up(event_bus: EventBus, reason: str):
+    """调度器回调：发送唤醒事件"""
+    logger.info(f"⏰ 等待结束，触发唤醒: {reason}")
+    event = OneBotEvent(
+        type=EventType.NOTICE,  # 使用 Notice 类型
+        detail_type="wake_up",
+        sub_type="timer",
+        source=EventSource(platform="system"),
+        message=f"【系统唤醒】: {reason}",
+        alt_message=f"【系统唤醒】: {reason}",
+        extra={"status": "wake_up"}
+    )
+    event_bus.publish_event(event)
+
+
 @register()
 async def send_message(
         message: str,
         platform: str,
         target_id: str,
         target_type: Literal["private", "group", "channel"],
+        wait_duration: Optional[float] = None,
         event_bus: EventBus = None,
         agent: AutonomousAgent = None,
+        scheduler: AsyncIOScheduler = None,
 ) -> str:
     """
     发送消息。支持指定发送目标（私聊/群组）。
-    发送消息之前必须获取基本信息（平台和用户ID/群组ID）
+    发送消息之前必须获取基本信息（平台和用户ID/群组ID）。
+    如果你希望在发送完这条消息后立刻进入等待/休眠状态，请填写 wait_duration 参数。
 
     Args:
         message: 消息内容。
         platform: 目标平台（PUID的前半部分）。
         target_id: 目标user_id或group_id（PUID的后半部分）。
         target_type: 消息类型 ('private', 'group', 'channel')。
+        wait_duration: (可选) 发送后等待的分钟数，为空则不等待。
     """
 
     if not target_id:
         return "错误: 无法确定发送目标 (target_id 为空)。"
 
-    # ==========================================
-    # 1. 情绪碎片化处理 (Fragmentation)
-    # ==========================================
+    # 1. 情绪碎片化处理
     try:
         # 延迟导入我们上一阶段编写的 OutputFragmenter
         from core.io.fragmentation import OutputFragmenter
@@ -63,9 +81,7 @@ async def send_message(
     if not fragments:
         return "消息已被过滤或为空，未发送任何内容。"
 
-    # ==========================================
     # 2. 带有真实感停顿的循环发送
-    # ==========================================
     final_status = ""
 
     for index, (frag_text, delay) in enumerate(fragments):
@@ -116,24 +132,32 @@ async def send_message(
         except Exception as e:
             return f"系统异常: 发送过程中发生错误 - {str(e)}"
 
-    # 循环走完，说明所有碎片都发送成功
+    # 3. 发送成功后的等待逻辑处理
+    if wait_duration is not None:
+        if not scheduler:
+            return f"{final_status}。但警告：调度器未初始化，系统未能进入等待状态。"
+
+        if wait_duration <= 0:
+            return f"{final_status}。但无法等待: 等待时长必须大于 0。"
+
+        # 添加调度任务
+        job = scheduler.add_job(
+            _dispatch_wake_up,
+            'date',
+            run_date=datetime.datetime.now() + datetime.timedelta(minutes=wait_duration),
+            args=[event_bus, "等待超时"]
+        )
+
+        if agent:
+            agent.wakeup_job_id = job.id
+            agent.is_sleeping = True
+
+        logger.info(f"💤 消息发送完毕，已进入等待状态。")
+
+        return "已结束等待 | " + final_status
+
+    # 如果模型没有传入等待参数，正常返回发送成功的文本
     return final_status
-
-
-# --- 内部辅助函数：发送唤醒事件 ---
-async def _dispatch_wake_up(event_bus: EventBus, reason: str):
-    """调度器回调：发送唤醒事件"""
-    logger.info(f"⏰ 等待结束，触发唤醒: {reason}")
-    event = OneBotEvent(
-        type=EventType.NOTICE,  # 使用 Notice 类型
-        detail_type="wake_up",
-        sub_type="timer",
-        source=EventSource(platform="system"),
-        message=f"【系统唤醒】: {reason}",
-        alt_message=f"【系统唤醒】: {reason}",
-        extra={"status": "wake_up"}
-    )
-    event_bus.publish_event(event)
 
 
 @register()

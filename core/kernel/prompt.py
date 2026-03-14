@@ -353,7 +353,7 @@ prime_directives:
 
         # 合并输出
         return "\n".join([
-            self.role,
+            self.role + '\n',
             base_prompt,
             system_block,
             time_block,

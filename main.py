@@ -6,16 +6,16 @@ import sys
 import threading
 from typing import List, Optional
 
+from core.evolution.skill_fabricator import SkillFabricator
 from core.gui.monitor_registry import monitor_registry
-# --- 基础设施层 ---
+from core.infrastructure.api_client import GenericAPIClient
 from core.infrastructure.config_loader import Config
+from core.infrastructure.daemon_manager import DaemonManager
 from core.infrastructure.database import Database
 from core.infrastructure.logger import setup_logger
 from core.io.adapters.console import ConsoleAdapter
 from core.io.adapters.onebot_v11 import OneBotV11Adapter
-# --- 神经系统层 ---
 from core.io.event_bus import EventBus
-# --- 认知内核层 ---
 from core.kernel.agent import AutonomousAgent
 from core.kernel.task_engine import TaskEngine
 
@@ -42,6 +42,9 @@ class AethelSystem:
         self.config = None
         self.db = None
         self.bus = None
+        self.api_client_global = None
+        self.daemon_manager = None
+        self.skill_fabricator = None
         self.agent = None
         self.task_engine = None
         self.recorder = None
@@ -69,6 +72,18 @@ class AethelSystem:
         # 4. 启动神经总线
         self.bus = EventBus()
 
+        self.api_client_global = GenericAPIClient(self.config)
+        dependency_map = {
+            "config": self.config,
+            "database": self.db,
+            "event_bus": self.bus,
+            "api_client": self.api_client_global
+        }
+        self.daemon_manager = DaemonManager(self.bus, self.db, dependency_map)
+        await self.daemon_manager.initialize()
+
+        self.skill_fabricator = SkillFabricator(self.bus, self.api_client_global)
+
         # 5. 唤醒 Agent
         # Agent 内部会自动初始化 ToolManager, Hippocampus, Scheduler
         self.agent = AutonomousAgent(self.config, self.bus, self.db)
@@ -87,6 +102,9 @@ class AethelSystem:
         # 依赖注入
         self.agent.tool_manager.add_dependency("ob_adapter", ob_adapter)
         self.agent.tool_manager.add_dependency("adapters", self.adapters)
+        self.agent.tool_manager.add_dependency("daemon_manager", self.daemon_manager)
+
+        self.task_engine.tool_manager.add_dependency("daemon_manager", self.daemon_manager)
 
         # === 注册 GUI 监控点 ===
         self._register_monitors()
@@ -99,6 +117,11 @@ class AethelSystem:
         monitor_registry.register_text_source(
             "系统", "配置",
             lambda: self.config.all
+        )
+        monitor_registry.register_text_source(
+            "系统", "后台进程",
+            lambda: "\n".join(
+                [f"- {name}" for name in self.daemon_manager.running_tasks.keys()]) if self.daemon_manager else "无"
         )
 
     async def start(self):
@@ -136,14 +159,23 @@ class AethelSystem:
             if not task.done():
                 task.cancel()
 
+        # 强制停止所有后台脚本
+        if self.daemon_manager:
+            for d_name in list(self.daemon_manager.running_tasks.keys()):
+                self.daemon_manager.stop_daemon(d_name)
+
         # 2. 等待任务结束
         if self.tasks:
             logger.info("正在等待后台任务终止...")
             await asyncio.gather(*self.tasks, return_exceptions=True)
 
-        # 3. 关闭 API Client
+        # 3. 关闭所有 API Client
         if self.agent and self.agent.api_client:
             await self.agent.api_client.close()
+        if self.task_engine and self.task_engine.api_client:
+            await self.task_engine.api_client.close()
+        if self.api_client_global:
+            await self.api_client_global.close()
 
         logger.info("系统已完全关闭。再见。")
 

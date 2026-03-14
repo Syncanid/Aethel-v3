@@ -291,7 +291,8 @@ class AutonomousAgent:
         if current_estimated_tokens <= SAFE_LIMIT:
             return current_estimated_tokens
 
-        logger.warning(f"⚠️ [S1 应急防御] Token估算 ({int(current_estimated_tokens)}) 突破物理红线 ({SAFE_LIMIT})！InfiniteContext 压制失效，启动强制切割。")
+        logger.warning(
+            f"⚠️ [S1 应急防御] Token估算 ({int(current_estimated_tokens)}) 突破物理红线 ({SAFE_LIMIT})！InfiniteContext 压制失效，启动强制切割。")
 
         # 始终保留 System Prompt (index 0) 和最近的一小部分消息以维持最小对话惯性
         while len(self.history) > 6 and current_estimated_tokens > SAFE_LIMIT:
@@ -421,16 +422,9 @@ class AutonomousAgent:
             logger.info("开始执行全新启动")
             self.history.clear()
             self.history.append({"role": "system", "content": system_prompt})
-            self.history.append({"role": "user", "content": "系统启动完成。"})
         else:
             # 恢复启动：更新最新的 system prompt（防止代码修改没生效）
             self.history[0] = {"role": "system", "content": system_prompt}
-
-            # 向 Agent 发送断点恢复提示，让它知道刚刚发生了重启
-            self.history.append({
-                "role": "user",
-                "content": "【系统事件】Aethel，系统刚刚经历了一次重启。你之前的所有记忆、历史和状态已完美恢复，请继续工作。"
-            })
 
         # 3. 启动后台任务
         asyncio.create_task(self.hippocampus.start())
@@ -627,10 +621,10 @@ class AutonomousAgent:
                         plan = monologue.get("planning", "No plan")
                         action = parsed_data.get("action", "reply")
 
-                        # 更新 Scratchpad
-                        new_scratchpad = parsed_data.get("scratchpad", None)
-                        if new_scratchpad and isinstance(new_scratchpad, dict):
-                            self.scratchpad = new_scratchpad
+                        # 更新 tasks
+                        tasks = parsed_data.get("tasks", None)
+                        if tasks and isinstance(tasks, list):
+                            self.scratchpad["tasks"] = tasks
                             self.tool_manager.agent_state = self.scratchpad
 
                         # 广播思考过程 (EventBus)
@@ -982,6 +976,18 @@ class AutonomousAgent:
                 "required": ["emotion_check", "planning"],
                 "additionalProperties": False
             },
+            "tasks": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "description": {"type": "string"},
+                        "status": {"type": "string", "enum": ["pending", "working", "done", "failed"]}
+                    },
+                    "required": ["description", "status"],
+                    "additionalProperties": False
+                }
+            },
             "action": {
                 "type": "string",
                 "enum": ["reply", "action", "tool", "ignore"],
@@ -989,7 +995,7 @@ class AutonomousAgent:
             },
         }
 
-        required_fields = ["inner_monologue", "action"]
+        required_fields = ["inner_monologue", "tasks", "action"]
 
         # 根据配置决定是否将 tool_calls 注入 Schema
         if use_schema_tools:
