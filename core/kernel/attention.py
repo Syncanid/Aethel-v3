@@ -163,28 +163,28 @@ class AttentionFilter:
 
     async def _calculate_dynamic_threshold(self, event: OneBotEvent) -> Tuple[float, str]:
         """
-        计算边缘系统动态阈值，影响 LLM 的敏感度。
-        公式: Thr = Base - (Dopamine * 0.2) + (Cortisol * 0.3) - (Inertia)
+        计算潜意识动态阈值，影响 LLM 的插话敏感度。
+        公式: Thr = Base - (Curiosity * 0.2) + (SurvivalPressure * 0.3) - (SocialNeed * 0.3) - (Inertia)
         """
         state = await self._get_neuro_state()
         threshold = self.BASE_THRESHOLD
         factors = []
 
-        # A. 多巴胺 (兴奋/开心) -> 降低阈值 (变得话痨)
-        if state.dopamine > 0.5:
-            mod = (state.dopamine - 0.5) * 0.4
+        # A. 探索欲 (好奇心) -> 降低阈值 (更愿意参与新话题，话痨)
+        if state.curiosity > 0.5:
+            mod = (state.curiosity - 0.5) * 0.4
             threshold -= mod
-            factors.append(f"Excited-{mod:.2f}")
+            factors.append(f"Curious-{mod:.2f}")
 
-        # B. 皮质醇 (压力/焦虑/烦躁) -> 大幅提高阈值 (变得自闭/高冷)
-        if state.cortisol > 0.5:
-            mod = (state.cortisol - 0.5) * 0.6
+        # B. 生存压力 (高负载/报错) -> 大幅提高阈值 (变得自闭/高冷，不想理会普通闲聊)
+        if state.survival_pressure > 0.5:
+            mod = (state.survival_pressure - 0.5) * 0.6
             threshold += mod
             factors.append(f"Stressed+{mod:.2f}")
 
-        # C. 社交饱腹感 (孤独) -> 降低阈值 (极度渴望聊天)
-        if state.social_satiety < 0.3:
-            mod = (0.3 - state.social_satiety) * 0.5
+        # C. 社交渴望 (孤独) -> 降低阈值 (极度渴望聊天)
+        if state.social_need > 0.5:
+            mod = (state.social_need - 0.5) * 0.5
             threshold -= mod
             factors.append(f"Lonely-{mod:.2f}")
 

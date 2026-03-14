@@ -362,9 +362,9 @@ class Hippocampus:
 
             # 在保存记忆前，获取当前边缘系统情绪
             current_state = await self.limbic.get_state()
-            dop = current_state.dopamine
-            cor = current_state.cortisol
-            ser = current_state.serotonin
+            mem_social = current_state.social_need
+            mem_curiosity = current_state.curiosity
+            mem_pressure = current_state.survival_pressure
 
             # 1. 存储节点与冲突消解
             for mem in memories:
@@ -386,12 +386,10 @@ class Hippocampus:
 
                     if action != "DELETE":
                         if mem["type"] == "episodic":
-                            em = EpisodicMemory(content=content, emotion_dopamine=dop, emotion_cortisol=cor,
-                                                emotion_serotonin=ser)
+                            em = EpisodicMemory(content=content, emotion_social=mem_social, emotion_curiosity=mem_curiosity, emotion_pressure=mem_pressure)
                             await self.vector_store.save_vector_memory(em, puid)
                         elif mem["type"] == "semantic":
-                            sm = SemanticMemory(content=content, emotion_dopamine=dop, emotion_cortisol=cor,
-                                                emotion_serotonin=ser)
+                            sm = SemanticMemory(content=content, emotion_social=mem_social, emotion_curiosity=mem_curiosity, emotion_pressure=mem_pressure)
                             await self.vector_store.save_vector_memory(sm, puid)
 
             # 2. 存储图谱边

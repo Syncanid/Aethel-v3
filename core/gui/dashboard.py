@@ -83,14 +83,7 @@ class MonitorWindow(QMainWindow):
             if range_val == 0: range_val = 1
             percent = int((val - data["min"]) / range_val * 100)
             w["bar"].setValue(max(0, min(100, percent)))
-
-            # 简单的颜色逻辑
-            if "Cortisol" in label:
-                w["bar"].setStyleSheet("QProgressBar::chunk { background-color: #FF5252; }")  # 红色
-            elif "Dopamine" in label:
-                w["bar"].setStyleSheet("QProgressBar::chunk { background-color: #FFD740; }")  # 黄色
-            else:
-                w["bar"].setStyleSheet("QProgressBar::chunk { background-color: #69F0AE; }")  # 绿色
+            w["bar"].setStyleSheet("QProgressBar::chunk { background-color: #69F0AE; }")  # 绿色
 
         # 2. 更新文本数据 (Tabs)
         text_groups = monitor_registry.get_text_data()

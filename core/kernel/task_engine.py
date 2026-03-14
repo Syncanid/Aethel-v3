@@ -14,6 +14,7 @@ from core.infrastructure.database import Database
 from core.io.event_bus import EventBus
 from core.io.event_schema import OneBotEvent, DetailType, EventType, Action
 from core.kernel.task_registry import global_task_registry
+from core.limbic.manager import LimbicManager
 from core.memory.infinite_context import InfiniteContextManager
 from core.tool_manager.aggregator import ToolManager
 from core.utilities import calculate_tokens
@@ -46,6 +47,7 @@ class TaskEngine:
         self.event_bus = event_bus
         self.database = database
         self.api_client = GenericAPIClient(config)
+        self.limbic = LimbicManager(config, database, event_bus, self.api_client)
 
         # --- 内部状态 (针对当前正在执行的任务) ---
         self.history: List[Dict[str, Any]] = []
@@ -375,6 +377,7 @@ class TaskEngine:
 
                 # --- B. 思考 (Call LLM) ---
                 response_msg = await self._call_llm()
+                await self.limbic.consume_action_energy("complex_reasoning")
 
                 content_str = response_msg.get("content", "")
                 if isinstance(content_str, str):

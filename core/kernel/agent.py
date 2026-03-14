@@ -700,8 +700,7 @@ class AutonomousAgent:
 
                         # 聊天消耗能量逻辑
                         if name in ["send_message"]:
-                            current_neuro_state = await self.limbic.get_state()
-                            self.limbic.homeostasis.consume_resource(current_neuro_state, "chat")
+                            await self.limbic.consume_action_energy("chat")
 
                         try:
                             self.event_bus.publish_action(Action(
@@ -758,12 +757,19 @@ class AutonomousAgent:
         """
         [事件转译层] 将系统事件转化为 LLM 可理解的自然语言描述
         """
-        # 1. 处理内部驱动 (生理需求)
+        # 1. 处理内部驱动
         if event.detail_type == DetailType.INTERNAL_DRIVE:
-            # 解析 raw_data 中的驱动力信息
-            drive_name = event.raw_data.get("drive", "unknown")
-            desc = event.raw_data.get("description", "")
-            return f"【生理信号】{desc} (驱动力: {drive_name})，请决定是否采取行动。"
+            target_category = event.extra.get("target_category", "任何人")
+            narrative = event.extra.get("narrative", "")
+
+            return (f"【潜意识冲动涌现】\n"
+                    f"你突然产生了一个强烈的内部冲动：\"{narrative}\"\n"
+                    f"你潜意识里希望倾诉的对象分类是：[{target_category}]。\n"
+                    f"【决策要求】：\n"
+                    f"1. 你是否记得任何属于该分类（如管理员或某个群聊）的具体ID？\n"
+                    f"2. 评估当前的时间和语境，现在发消息合适吗？\n"
+                    f"决策：如果你明确知道该发给谁且决定行动，请直接调用 `send_message` 工具主动发起对话。\n"
+                    f"如果你想不起来具体ID，或者认为现在不适合打扰别人，请调用 `wait` 压制这个冲动并继续休眠。")
 
         # 2. 处理通知 (Notice)
         if event.type == EventType.NOTICE:

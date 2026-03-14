@@ -442,11 +442,11 @@ class VectorStore:
                     return 0.5  # 图谱客观事实给中等距离，不严厉惩罚
 
                 # 计算欧几里得距离: 当前情绪与记忆编码时情绪的距离
-                dop_diff = current_state.dopamine - meta.get("emotion_dopamine", 0.5)
-                cor_diff = current_state.cortisol - meta.get("emotion_cortisol", 0.5)
-                ser_diff = current_state.serotonin - meta.get("emotion_serotonin", 0.5)
+                soc_diff = current_state.social_need - meta.get("emotion_social", 0.0)
+                cur_diff = current_state.curiosity - meta.get("emotion_curiosity", 0.0)
+                pre_diff = current_state.survival_pressure - meta.get("emotion_pressure", 0.0)
 
-                return math.sqrt(dop_diff ** 2 + cor_diff ** 2 + ser_diff ** 2)
+                return math.sqrt(soc_diff ** 2 + cur_diff ** 2 + pre_diff ** 2)
 
             # 综合得分 = 原RRF排名分数 - 情绪距离惩罚
             # 情绪状态越接近，惩罚越小，排名越靠前

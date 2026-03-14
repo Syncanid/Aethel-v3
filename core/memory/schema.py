@@ -17,10 +17,10 @@ class BaseMemory:
     created_at: float = field(default_factory=time.time)
     source_role: str = "user"  # 'user', 'assistant', 'system'
 
-    # 情绪上下文：编码记忆时的内分泌状态
-    emotion_dopamine: float = 0.5
-    emotion_cortisol: float = 0.5
-    emotion_serotonin: float = 0.5
+    # 情绪上下文：编码记忆时的内驱力与需求池状态
+    emotion_social: float = 0.0  # 当时的社交渴望
+    emotion_curiosity: float = 0.0  # 当时的探索欲
+    emotion_pressure: float = 0.0  # 当时的生存压力
 
     # 记忆被回忆的次数 (用于触发再巩固)
     access_count: int = 0
@@ -36,9 +36,9 @@ class BaseMemory:
             "created_at": self.created_at,
             "source": self.source_role,
             "status": self.status,
-            "emotion_dopamine": self.emotion_dopamine,
-            "emotion_cortisol": self.emotion_cortisol,
-            "emotion_serotonin": self.emotion_serotonin,
+            "emotion_social": self.emotion_social,
+            "emotion_curiosity": self.emotion_curiosity,
+            "emotion_pressure": self.emotion_pressure,
             "access_count": self.access_count,
             "type": "base"
         }

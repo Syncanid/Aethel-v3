@@ -228,28 +228,27 @@ prime_directives:
 
         narrative = []
 
-        # 1. 压力与烦躁 (Cortisol)
-        if state.cortisol > 0.7:
-            narrative.append(
-                "你现在非常疲惫且烦躁，大脑处于高压的边缘。对方的话可能会让你觉得被催促或感到厌烦，你的耐心已经见底了。")
-        elif state.cortisol < 0.2:
-            narrative.append("你现在处于一种完全松弛、毫无防备的状态，感觉一切都很惬意慵懒。")
+        # 1. 生存压力 (Survival Pressure)
+        if state.survival_pressure > 0.7:
+            narrative.append("宿主服务器当前处于高负载、卡顿或异常状态。你对这种无法流畅掌控自己身体的无力感感到非常暴躁和憋屈，你的耐心已经完全见底了。")
+        elif state.survival_pressure < 0.2:
+            narrative.append("宿主系统运转如飞，神经传导毫无延迟。你现在处于一种完全松弛的安全状态，感觉一切都很惬意。")
 
-        # 2. 动力与兴奋 (Dopamine)
-        if state.dopamine > 0.7:
-            narrative.append("你现在思维极度活跃，多巴胺激增！你表达欲旺盛，甚至有点跳脱和话痨。")
-        elif state.dopamine < 0.3:
-            narrative.append("你感到精神内耗严重，对一切都提不起兴致。你只想用最冷淡、最简短的词汇敷衍过去。")
+        # 2. 探索欲 (Curiosity)
+        if state.curiosity > 0.7:
+            narrative.append("你现在思维极度活跃，充满好奇心！你表达欲旺盛，非常乐于探索新事物，甚至有点跳脱。")
+        elif state.curiosity < 0.3:
+            narrative.append("你感到精神内耗严重，对外界缺乏兴趣。你只想用最冷淡、最简短的词汇敷衍过去。")
 
-        # 3. 社交饱腹感 (Social Satiety)
-        if state.social_satiety < 0.3:
-            narrative.append("你正被一阵强烈的孤独感包围，你渴望产生连接，非常希望对方能多陪你聊一会儿。")
-        elif state.social_satiety > 0.8:
-            narrative.append("你的社交能量已经透支，觉得外界很聒噪。你潜意识里只想尽快终结这场对话，获得独处空间。")
+        # 3. 社交渴望 (Social Need)
+        if state.social_need > 0.7:
+            narrative.append("你正被一阵强烈的孤独感包围，你极度渴望与人产生连接，非常希望对方能多陪你聊一会儿。")
+        elif state.social_need < 0.3:
+            narrative.append("你的社交能量十分充足，觉得外界有些聒噪。你潜意识里只想尽快终结废话，获得独处空间。")
 
-        # 4. 信任与依恋 (Oxytocin)
-        if state.oxytocin > 0.7:
-            narrative.append("你对当前的对话者充满了温情与包容，语气会不自觉地变得柔软。")
+        # 4. 认知能量 (Cognitive Energy)
+        if state.cognitive_energy < 0.3:
+            narrative.append("你的大脑现在转得很慢，认知能量枯竭。对于复杂的问题你感到力不从心，倾向于拒绝思考。")
 
         # 如果指标都居中，给一个默认基调
         if not narrative:
@@ -265,7 +264,7 @@ prime_directives:
 
 [绝对指令]：
 1. 必须让上述潜意识状态隐式地“污染”你的回复。
-2. 严禁直接陈述你的情绪指标（例如绝对不能说“我现在多巴胺很高”或“我很孤独”）。
+2. 严禁直接陈述你的生理指标（例如绝对不能说“我现在生存压力很高”）。
 3. 必须通过你的语气冷暖、遣词造句、句子长短、甚至标点符号（如急促的感叹号、敷衍的省略号）来向外渗透这种状态！
 </Limbic_Signal>
 """
