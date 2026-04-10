@@ -5,6 +5,7 @@ import logging
 from datetime import datetime
 from typing import Dict, Optional
 
+import aiofiles
 import httpx
 from openai import AsyncOpenAI
 
@@ -122,9 +123,13 @@ class GenericAPIClient:
 
         tool_choice_val = "auto"
 
+        if use_prompt_tools and not use_schema_tools:
+            logger.warning("配置冲突: use_prompt_tools 必须在 use_schema_tool_calls 开启时才有效。已自动强制开启 Schema 工具模式。")
+            use_schema_tools = True
+
         # 1. Prompt Tools 模式干预
         if use_prompt_tools and tools and schema:
-            logger.debug("API_Client: 检测到 Schema 与 Tools 约束碰撞，正在自动执行降维注入...")
+            logger.debug("API_Client: 启用 Prompt Tools，执行注入...")
             compressed_tools_text = self._compress_tool_schemas(tools)
             messages = copy.deepcopy(messages)
 
@@ -134,11 +139,8 @@ class GenericAPIClient:
             else:
                 messages.insert(0, {"role": "system", "content": compressed_tools_text})
 
-            tools = None
-            tool_choice_val = None
-
-        # 2. Schema Tools 模式干预 (JSON Schema 劫持注入)
-        elif use_schema_tools and tools and schema:
+        # 2. Schema Tools 模式干预
+        if use_schema_tools and tools and schema:
             logger.debug("API_Client: 启用 Schema Tool Calls，自动重构参数约束...")
             schema = copy.deepcopy(schema)
 
@@ -150,7 +152,7 @@ class GenericAPIClient:
             if "properties" not in schema:
                 schema["properties"] = {}
 
-            schema["properties"]["tool_calls"] = {
+            tool_calls_schema = {
                 "type": "array",
                 "items": {
                     "type": "object",
@@ -164,9 +166,16 @@ class GenericAPIClient:
             }
 
             if require_tools:
+                # 强制要求 key 存在
                 if "required" not in schema:
                     schema["required"] = []
-                schema["required"].append("tool_calls")
+                if "tool_calls" not in schema["required"]:
+                    schema["required"].append("tool_calls")
+
+                # 强制要求数组内至少包含 1 个元素，消灭 [] 空调用的合法性
+                tool_calls_schema["minItems"] = 1
+
+            schema["properties"]["tool_calls"] = tool_calls_schema
 
             tools = None
             tool_choice_val = None
@@ -213,6 +222,9 @@ class GenericAPIClient:
                     "strict": True
                 }
             }
+
+        async with aiofiles.open("data/payload_sent.json", "w", encoding="utf-8") as f:
+            await f.write(json.dumps(payload, ensure_ascii=False, indent=4))
 
         # --- 执行请求与洗稿 ---
         try:
