@@ -278,8 +278,7 @@ class GenericAPIClient:
                         "arguments": args
                     })
             elif isinstance(parsed_content, dict) and "tool_calls" in parsed_content:
-                # Schema模式下，提取后直接从 content 中抹除 tool_calls
-                schema_calls = parsed_content.pop("tool_calls", [])
+                schema_calls = parsed_content.get("tool_calls", [])
                 for tc in schema_calls:
                     args = tc.get("arguments", {})
                     if isinstance(args, str):

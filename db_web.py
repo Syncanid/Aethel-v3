@@ -59,8 +59,8 @@ async def get_index():
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Aethel Trinity 数据终端</title>
-    <link href="https://jsd.cdn.zzko.cn/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <script src="https://jsd.cdn.zzko.cn/npm/vue@3.3.4/dist/vue.global.prod.js"></script>
+    <link href="https://cdn.staticfile.org/bootstrap/5.3.0/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.staticfile.org/vue/3.3.4/vue.global.prod.js"></script>
     <style>
         body { background-color: #f8f9fa; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
         .sidebar { min-height: 100vh; background-color: #343a40; color: #fff; }
@@ -219,7 +219,7 @@ async def get_index():
 
 </div>
 
-<script src="https://jsd.cdn.zzko.cn/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.staticfile.org/bootstrap/5.3.0/js/bootstrap.bundle.min.js"></script>
 <script>
     const { createApp, ref, onMounted } = Vue;
 

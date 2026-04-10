@@ -410,7 +410,6 @@ class TaskEngine:
                         "role": "user",
                         "content": "【SYSTEM ERROR - DEADLOCK DETECTED】系统检测到你输出了与上一次完全一致的内容，且未执行任何有效动作！这会导致无限死循环！请立即改变规划思路，如果方法行不通，请调用 `conclude_task` 汇报失败，绝不许死磕！"
                     })
-                    self.last_response_content = ""
                     continue # 直接跳入下一轮让模型反思
 
                 self.last_response_content = content_for_deadlock

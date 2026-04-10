@@ -196,6 +196,14 @@ class AutonomousAgent:
             await next_call()
             return
 
+        if event.type == EventType.TASK and event.detail_type in [
+            DetailType.TASK_DISPATCH, "task_dispatch",
+            DetailType.TASK_UPDATE, "task_update",
+            DetailType.TASK_CANCEL, "task_cancel"
+        ]:
+            await next_call()
+            return
+
         # 1. 边缘系统“感受”刺激
         if event.type == EventType.MESSAGE and isinstance(event.message, str):
             asyncio.create_task(self.limbic.process_stimulus(event.message))
@@ -589,7 +597,6 @@ class AutonomousAgent:
                         "role": "user",
                         "content": "SYSTEM WARNING: 你输出的内容与上一次完全一致，且未执行任何操作。请改变策略，或使用 wait 工具挂起。"
                     })
-                    self.last_response_content = ""  # 重置以允许下一次尝试
                     continue  # 跳过本次处理，直接进入下一轮接收系统警告
 
                 self.last_response_content = content_for_deadlock
@@ -697,6 +704,10 @@ class AutonomousAgent:
                 return f"【系统通知】用户 {event.source.user_id} 加入了群聊 {event.source.group_id}。"
             elif event.detail_type == "group_member_decrease":
                 return f"【系统通知】用户 {event.source.user_id} 离开了群聊 {event.source.group_id}。"
+
+            elif event.detail_type == "internal_frustration":
+                return f"【后台告警】S2 任务引擎传来挫败感信号：\"{event.message}\" 请根据此上下文调整行动或安抚用户。"
+
             return f"【系统通知】检测到事件: {event.detail_type}"
 
         # 3. 处理请求 (Request)

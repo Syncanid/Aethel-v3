@@ -35,6 +35,11 @@ class Hippocampus:
         self.slow_lane_queue = asyncio.Queue()  # 待处理队列
         self.mimicry = SocialMimicry(config, api_client)
 
+        # 稳态睡眠追踪变量
+        current_time = time.time()
+        self.last_deep_sleep_time = current_time
+        self.last_active_time = current_time
+
         # 归档配置
         self.BUFFER_LIMIT = 5  # 积攒多少条触发
         self.SILENCE_TIMEOUT = 60  # 静默多少秒触发
@@ -166,23 +171,69 @@ class Hippocampus:
 
     async def _sleep_cycle_loop(self):
         """
-        睡眠周期：夜间执行 Episodic -> Semantic 压缩，以及图谱修剪
+        睡眠周期：执行 Episodic -> Semantic 压缩，以及图谱修剪
         """
         while self.is_running:
-            # 每天凌晨 3 点执行压缩 (这里为了演示，可使用定时器或固定检测)
-            now = time.localtime()
-            if now.tm_hour == 3 and now.tm_min == 0:
-                logger.info("🌙 进入深度睡眠周期：开始记忆维护...")
+            try:
+                current_time = time.time()
 
-                # 1. 压缩情景记忆
-                await self._compress_episodic_to_semantic()
+                # 1. 环境静默锁
+                # 默认要求系统至少完全静默 30 分钟，才能允许进入深层潜意识计算
+                idle_threshold = self.config.get("sleep.min_idle_seconds", 1800)
+                time_since_active = current_time - self.last_active_time
+                if time_since_active < idle_threshold:
+                    await asyncio.sleep(120)  # 环境嘈杂，推迟评估
+                    continue
 
-                # 2. 自动修剪与清理知识图谱
-                await self._prune_graph_edges()
+                # 2. 计算生物钟清醒驱力
+                time_since_sleep = current_time - self.last_deep_sleep_time
+                max_awake_limit = self.config.get("sleep.max_awake_seconds", 86400)  # 默认最长清醒24小时
+                circadian_score = min(time_since_sleep / max_awake_limit, 1.0)
 
-                await asyncio.sleep(60)  # 避免同一分钟内重复执行
+                # 3. 计算认知代谢压力
+                # 探测数据库中陈旧 Episodic 记忆的积压情况作为压力指标
+                try:
+                    # 仅作为轻量级探针，抓取 7 天前的数据量
+                    seven_days_ago = current_time - (7 * 86400)
+                    old_memories_probe = self.database.episodic_collection.get(
+                        where={"created_at": {"$lt": seven_days_ago}},
+                        include=["ids"]
+                    )
+                    backlog_count = len(old_memories_probe.get("ids", []))
+                except Exception:
+                    backlog_count = 0
 
-            await asyncio.sleep(30)  # 每半分钟检查一次时间
+                pressure_threshold = self.config.get("sleep.memory_backlog_threshold", 30)
+                metabolic_score = min(backlog_count / pressure_threshold, 1.0)
+
+                # 4. 稳态睡眠决策
+                # 权重分配：生物钟占据 40% 决策权，记忆积压程度占据 60% 决策权
+                sleep_drive = (circadian_score * 0.4) + (metabolic_score * 0.6)
+
+                # 当综合驱力突破 0.8，或者已经达到强制睡眠极限 (circadian_score == 1.0) 时触发
+                if sleep_drive >= 0.8 or circadian_score == 1.0:
+                    logger.info(
+                        f"🌙 睡眠驱力达到阈值 (Drive: {sleep_drive:.2f}, Idle: {int(time_since_active)}s). Agent 进入深度睡眠，开始记忆压缩与图谱修剪...")
+
+                    # 捕获维护任务本身的异常，防止线程崩溃
+                    try:
+                        await self._compress_episodic_to_semantic()
+                        await self._prune_graph_edges()
+                    except Exception as inner_e:
+                        logger.error(f"深度睡眠维护任务内部异常: {inner_e}", exc_info=True)
+
+                    # 无论维护是否成功，都重置睡眠时钟，避免陷入死亡循环
+                    self.last_deep_sleep_time = time.time()
+
+                    # 深度睡眠是一项极其消耗 CPU 的操作，完成后强制进行长周期休眠降温
+                    await asyncio.sleep(3600)
+                    continue
+
+            except Exception as e:
+                logger.error(f"睡眠周期驱力评估引擎异常: {e}", exc_info=True)
+
+            # 采用弹性轮询，避免空耗 CPU，没必要像原代码一样每 30 秒查一次
+            await asyncio.sleep(300)
 
     async def _compress_episodic_to_semantic(self):
         """执行记忆压缩算法"""
@@ -195,7 +246,12 @@ class Hippocampus:
 
         for uid in user_ids:
             old_memories = self.database.episodic_collection.get(
-                where={"user_id": uid, "created_at": {"$lt": seven_days_ago}},
+                where={
+                    "$and": [
+                        {"user_id": {"$eq": uid}},
+                        {"created_at": {"$lt": seven_days_ago}}
+                    ]
+                },
                 include=["documents", "ids"]
             )
 
@@ -204,9 +260,9 @@ class Hippocampus:
 
             content_list = old_memories["documents"]
             prompt = f"""
-            你是一个睡眠中的大脑。请将以下零散的短期对话情景记忆，压缩提取为1-2条关于用户的【长期的、概括性的事实或习惯】。
-            原始片段：{json.dumps(content_list, ensure_ascii=False)}
-            """
+你是一个睡眠中的大脑。请将以下零散的短期对话情景记忆，压缩提取为1-2条关于用户的【长期的、概括性的事实或习惯】。
+原始片段：{json.dumps(content_list, ensure_ascii=False)}
+"""
 
             resp = await self.api_client.create_chat_completion([{"role": "user", "content": prompt}])
             compressed_fact = resp.get("content", "").strip()
@@ -281,6 +337,7 @@ class Hippocampus:
                 if msg.get("role") in ["user", "assistant"]:
                     new_msgs.append(msg)
                     self.processed_ids.add(msg_id)
+                    self.last_active_time = time.time()
 
         # 清理已不存在的消息ID (防止内存泄漏)
         self.processed_ids.intersection_update(current_history_ids)
@@ -294,6 +351,13 @@ class Hippocampus:
         prompt = """
 你是一个顶尖的认知科学家与记忆状态机。
 你的任务是将短期的对话流转化为长期的事实、情景，并提取出【实体关系网络(图谱)】。
+
+## 记忆提取黑名单 (CRITICAL)
+在分析对话时，你**绝对禁止**提取以下类型的内容作为记忆：
+1. **系统内部指令与日志**：如“任务派发”、“系统提示”、“系统接收到底层事件”、“调用工具”、“广播日志”等内部运行痕迹。
+2. **瞬时与时效性任务状态**：如“目标任务是...”、“正在解析”、“准备下载”、“遇到死胡同”等属于当下工作流的临时状态。
+3. **系统自言自语或格式化报错**。
+你**只允许**提取：稳定的长期的客观事实、明确的用户个人偏好、以及人际关系与真实的情感状态。
 
 ## 输出要求 (JSON)
 1. `memories`: 独立的陈述事实。
@@ -385,10 +449,12 @@ class Hippocampus:
 
                     if action != "DELETE":
                         if mem["type"] == "episodic":
-                            em = EpisodicMemory(content=content, emotion_social=mem_social, emotion_curiosity=mem_curiosity, emotion_pressure=mem_pressure)
+                            em = EpisodicMemory(content=content, emotion_social=mem_social,
+                                                emotion_curiosity=mem_curiosity, emotion_pressure=mem_pressure)
                             await self.vector_store.save_vector_memory(em, puid)
                         elif mem["type"] == "semantic":
-                            sm = SemanticMemory(content=content, emotion_social=mem_social, emotion_curiosity=mem_curiosity, emotion_pressure=mem_pressure)
+                            sm = SemanticMemory(content=content, emotion_social=mem_social,
+                                                emotion_curiosity=mem_curiosity, emotion_pressure=mem_pressure)
                             await self.vector_store.save_vector_memory(sm, puid)
 
             # 2. 存储图谱边
