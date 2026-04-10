@@ -258,13 +258,7 @@ class VectorStore:
                 model=self.api_client.model,
                 schema=schema
             )
-
-            content = message.get("content", "").strip()
-            if "<think>" in content and "</think>" in content:
-                content = content.split("</think>")[-1].strip()
-
-            # 解析 JSON
-            data = json.loads(content)
+            data = message.get("content", {})
             return data.get("entities", [])
 
         except Exception as e:

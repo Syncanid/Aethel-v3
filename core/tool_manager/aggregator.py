@@ -337,13 +337,9 @@ class ToolManager:
                     "description": "Fixed arguments for the tool",
                     "additionalProperties": True
                 },
-                tool_choice="none"
+                require_tools=False
             )
-
-            content = response["choices"][0]["message"]["content"]
-            fixed_args = json.loads(content)
-
-            # 简单的防呆检查：防止返回空或者完全不相关的结构
+            fixed_args = response.get("content", {})
             if not fixed_args and original_args:
                 return None
 

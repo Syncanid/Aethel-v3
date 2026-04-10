@@ -80,7 +80,7 @@ class SkillFabricator:
                 messages=messages,
                 schema=schema
             )
-            result_json = json.loads(response["choices"][0]["message"]["content"])
+            result_json = response.get("content", {})
 
             logger.info(f"🧬 [演化系统] 提纯完成，开始安装技能: {result_json['skill_name']}")
 

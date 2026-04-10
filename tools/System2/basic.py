@@ -254,19 +254,11 @@ async def advanced_think(
             messages=messages,
             schema=output_schema  # 直接传入 Schema 启用 Structured Outputs
         )
-
-        # 提取内容 (GenericAPIClient 返回完整的 OpenAI 格式 dict)
-        raw_content = response_data["choices"][0]["message"]["content"]
-
-        # 解析 JSON
-        result = json.loads(raw_content)
-
+        result = response_data.get("content", {})
         # 注入元数据
         result["mode"] = mode
-
         # 裁剪置信度
         result["confidence"] = max(0.0, min(1.0, float(result.get("confidence", 0.0))))
-
         return result
 
     except Exception as e:

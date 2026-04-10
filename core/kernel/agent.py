@@ -562,44 +562,28 @@ class AutonomousAgent:
                     logger.warning(f"Failed to write debug logs: {e}")
 
                 # 调用 LLM
-                response_msg = await self._call_llm()
+                response_data = await self._call_llm()
 
-                # 解析 LLM 响应
-                content_str = response_msg.get("content")
+                # 解析响应
+                parsed_data = response_data.get("content", {})
+                tool_queue = response_data.get("tool_calls", [])
+                raw_receive = response_data.get("raw_receive", {})
 
-                if isinstance(content_str, str):
-                    content_str = (content_str
-                                   .replace("```json", "")
-                                   .replace("```", "")
-                                   .strip())
-                else:
-                    content_str = "{}"
-
-                # 处理原生 Tool Calls
-                native_tool_calls = response_msg.get("tool_calls", [])
-                # 注入 Assistant 历史记录
-                # 如果存在原生 tool_calls，必须保留完整结构，否则后续 role: tool 会报错
-                if native_tool_calls:
-                    # 复制消息对象以确保存入的是符合 API 标准的字典
-                    msg_entry = response_msg.copy()
-                    # 确保 content 字段存在（即使为空）
+                # 回填历史记录
+                if raw_receive.get("tool_calls"):
+                    msg_entry = raw_receive.copy()
                     if "content" not in msg_entry or msg_entry["content"] is None:
                         msg_entry["content"] = ""
                     self.history.append(msg_entry)
                 else:
-                    # Schema 模式回填
-                    try:
-                        # 尝试格式化 JSON 以美观存储
-                        if content_str.strip().startswith("{"):
-                            formatted_content = json.dumps(json.loads(content_str), ensure_ascii=False)
-                            self.history.append({"role": "assistant", "content": formatted_content})
-                        else:
-                            self.history.append({"role": "assistant", "content": content_str})
-                    except:
-                        self.history.append({"role": "assistant", "content": content_str})
+                    formatted_content = (json.dumps(parsed_data, ensure_ascii=False)
+                                         if isinstance(parsed_data, dict) else str(parsed_data))
+                    self.history.append({"role": "assistant", "content": formatted_content})
 
-                # [v1 移植] 死锁检测
-                if content_str and content_str == self.last_response_content and not native_tool_calls:
+                # [死锁检测] 将结构化数据序列化后比对
+                content_for_deadlock = (json.dumps(parsed_data, sort_keys=True)
+                                        if isinstance(parsed_data, dict) else str(parsed_data))
+                if content_for_deadlock and content_for_deadlock == self.last_response_content and not tool_queue:
                     logger.warning("⚠️ 检测到内容重复死锁。")
                     self.history.append({
                         "role": "user",
@@ -608,95 +592,39 @@ class AutonomousAgent:
                     self.last_response_content = ""  # 重置以允许下一次尝试
                     continue  # 跳过本次处理，直接进入下一轮接收系统警告
 
-                self.last_response_content = content_str
+                self.last_response_content = content_for_deadlock
 
                 # --- C. 行动阶段 (Action) ---
                 self.next_response_use_tools = False
-                tool_execution_queue = []  # 待执行任务列表: {name, args, id(可选)}
 
-                # 1. 尝试解析 Schema 模式的 JSON
-                if content_str:
-                    try:
-                        parsed_data = json.loads(content_str)
+                if isinstance(parsed_data, dict):
+                    monologue = parsed_data.get("inner_monologue", {})
+                    emotion = monologue.get("emotion_check", "Neutral")
+                    plan = monologue.get("planning", "No plan")
+                    action = parsed_data.get("action", "reply")
 
-                        # 提取双层信息
-                        monologue = parsed_data.get("inner_monologue", {})
+                    tasks = parsed_data.get("tasks", None)
+                    if tasks and isinstance(tasks, list):
+                        self.scratchpad["tasks"] = tasks
+                        self.tool_manager.agent_state = self.scratchpad
 
-                        # 构造思考日志
-                        emotion = monologue.get("emotion_check", "Neutral")
-                        plan = monologue.get("planning", "No plan")
-                        action = parsed_data.get("action", "reply")
+                    self.event_bus.publish_action(Action(
+                        action="broadcast_log",
+                        params={"content": f"🧠 心流: [{emotion}] {plan} | 决定: {action}"}
+                    ))
 
-                        # 更新 tasks
-                        tasks = parsed_data.get("tasks", None)
-                        if tasks and isinstance(tasks, list):
-                            self.scratchpad["tasks"] = tasks
-                            self.tool_manager.agent_state = self.scratchpad
+                    if action in ["ignore"]:
+                        self.force_sleep = True
 
-                        # 广播思考过程 (EventBus)
-                        self.event_bus.publish_action(Action(
-                            action="broadcast_log",
-                            params={"content": f"🧠 心流: [{emotion}] {plan} | 决定{action}"}
-                        ))
+                    if action in ["reply", "action", "tool"]:
+                        self.next_response_use_tools = True
 
-                        if action in ["ignore"]:
-                            self.force_sleep = True
-
-                        if action in ["reply", "action", "tool"]:
-                            self.next_response_use_tools = True
-
-                        # 提取 Schema Tool Calls
-                        schema_calls = parsed_data.get("tool_calls", [])
-                        for tc in schema_calls:
-                            tool_execution_queue.append({
-                                "name": tc.get("name"),
-                                "args": tc.get("arguments"),
-                                "id": None  # Schema 模式没有 ID
-                            })
-
-                    except json.JSONDecodeError as e:
-                        # 如果是原生模式且没有 JSON 内容，这是正常的，忽略错误
-                        if not native_tool_calls:
-                            logger.error(f"JSON 解析失败: {e}\n{content_str}")
-                            self.history.append({
-                                "role": "user",
-                                "content": f"SYSTEM ERROR: JSON Format Error: {e}"
-                            })
-                            continue
-
-                # 2. 提取 Native Tool Calls
-                if native_tool_calls:
-                    for tc in native_tool_calls:
-                        # 兼容 object (OpenAI Object) 和 dict
-                        func = tc.function if hasattr(tc, 'function') else tc.get("function", {})
-                        t_id = tc.id if hasattr(tc, 'id') else tc.get("id")
-
-                        name = func.name if hasattr(func, 'name') else func.get("name")
-                        args = func.arguments if hasattr(func, 'arguments') else func.get("arguments")
-
-                        tool_execution_queue.append({
-                            "name": name,
-                            "args": args,  # 原生 args 通常是 JSON 字符串
-                            "id": t_id
-                        })
-
-                # 3. 执行工具列表
-                if tool_execution_queue:
-                    for task in tool_execution_queue:
+                # 执行工具队列
+                if tool_queue:
+                    for task in tool_queue:
                         name = task["name"]
-                        args = task["args"]
+                        args = task["arguments"]
                         t_id = task["id"]
-
-                        # 参数清洗与解析
-                        if isinstance(args, str):
-                            try:
-                                args = json.loads(args
-                                                  .replace("```json", "")
-                                                  .replace("```", "")
-                                                  .strip())
-                            except json.JSONDecodeError:
-                                logger.warning(f"工具 {name} 参数解析失败: {args}")
-                                args = {}
 
                         # 聊天消耗能量逻辑
                         if name in ["send_message"]:
@@ -732,20 +660,12 @@ class AutonomousAgent:
                         except Exception as e:
                             logger.error(f"工具执行错误: {e}", exc_info=True)
                             error_msg = f"Error: {str(e)}"
-
-                            if t_id:
-                                self.history.append({
-                                    "role": "tool",
-                                    "tool_call_id": t_id,
-                                    "name": name,
-                                    "content": error_msg
-                                })
-                            else:
-                                self.history.append({
-                                    "role": "tool",
-                                    "name": name,
-                                    "content": error_msg
-                                })
+                            self.history.append({
+                                "role": "tool",
+                                **({"tool_call_id": t_id} if t_id else {}),
+                                "name": name,
+                                "content": error_msg
+                            })
 
                 await self.save_state()
 
@@ -960,74 +880,44 @@ class AutonomousAgent:
         """封装 API 调用"""
         tools = self.tool_manager.get_tool_schemas()
 
-        use_schema_tools = self.config.get("llm.use_schema_tool_calls", True)
-        arg_mode = self.config.get("llm.tool_call_arg_mode", "object")
-
-        # 基础结构
-        properties = {
-            # 1. 内心独白层
-            "inner_monologue": {
-                "type": "object",
-                "description": "在回复前的思考过程。",
-                "properties": {
-                    "emotion_check": {
-                        "type": "string",
-                        "description": "自检当前的生理状态和情绪基调。"
-                    },
-                    "planning": {
-                        "type": "string",
-                        "description": "具体的思维链推理过程。"
-                    },
-                },
-                "required": ["emotion_check", "planning"],
-                "additionalProperties": False
-            },
-            "tasks": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "description": {"type": "string"},
-                        "status": {"type": "string", "enum": ["pending", "working", "done", "failed"]}
-                    },
-                    "required": ["description", "status"],
-                    "additionalProperties": False
-                }
-            },
-            "action": {
-                "type": "string",
-                "enum": ["reply", "action", "tool", "ignore"],
-                "description": "动作：reply(回复这条消息)、action(需要调用wait挂起等待、派发任务等)、tool(需要调用工具)、ignore(厌恶/不想理睬)"
-            },
-        }
-
-        required_fields = ["inner_monologue", "tasks", "action"]
-
-        # 根据配置决定是否将 tool_calls 注入 Schema
-        if use_schema_tools:
-            # 根据配置决定 arguments 是 object 还是 string
-            arg_schema = {"type": "object"} if arg_mode == "object" else {"type": "string",
-                                                                          "description": "工具的参数对象，JSON格式。例如 '{\"url\": \"https://google.com\"}'"}
-
-            properties["tool_calls"] = {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "arguments": arg_schema
-                    },
-                    "required": ["name", "arguments"],
-                    "additionalProperties": False
-                }
-            }
-            required_fields.append("tool_calls")
-
-        # 定义强制思维 Schema (JSON Schema)
         thought_structure = {
             "type": "object",
-            "properties": properties,
-            "required": required_fields,
+            "properties": {
+                "inner_monologue": {
+                    "type": "object",
+                    "description": "在回复前的思考过程。",
+                    "properties": {
+                        "emotion_check": {
+                            "type": "string",
+                            "description": "自检当前的生理状态和情绪基调。"
+                        },
+                        "planning": {
+                            "type": "string",
+                            "description": "具体的思维链推理过程。"
+                        },
+                    },
+                    "required": ["emotion_check", "planning"],
+                    "additionalProperties": False
+                },
+                "tasks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "description": {"type": "string"},
+                            "status": {"type": "string", "enum": ["pending", "working", "done", "failed"]}
+                        },
+                        "required": ["description", "status"],
+                        "additionalProperties": False
+                    }
+                },
+                "action": {
+                    "type": "string",
+                    "enum": ["reply", "action", "tool", "ignore"],
+                    "description": "动作：reply(回复这条消息)、action(需要调用wait挂起等待、派发任务等)、tool(需要调用工具)、ignore(厌恶/不想理睬)"
+                },
+            },
+            "required": ["inner_monologue", "tasks", "action"],
             "additionalProperties": False
         }
 
@@ -1036,12 +926,9 @@ class AutonomousAgent:
             for d in self.history
         ]
 
-        # 调用 API，同时传入 tools 和 schema
-        response = await self.api_client.create_chat_completion(
+        return await self.api_client.create_chat_completion(
             messages=sanitized_history,
             tools=tools if tools else None,
             schema=thought_structure,
-            tool_choice="auto" if use_schema_tools else ("required" if self.next_response_use_tools else "auto")
+            require_tools=self.next_response_use_tools
         )
-
-        return response["choices"][0]["message"]

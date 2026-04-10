@@ -88,13 +88,7 @@ class ToolOutputCache:
                 system_prompt="你是一个冷酷、高效的信息过滤引擎。",
                 model=model
             )
-
-            content = message.get("content", "")
-            # 清理可能存在的 thinking 标签
-            if "<think>" in content and "</think>" in content:
-                content = content.split("</think>")[-1].strip()
-
-            return content.strip()
+            return message.get("content", "").strip()
 
         except Exception as e:
             logger.error(f"提取内容失败: {e}")

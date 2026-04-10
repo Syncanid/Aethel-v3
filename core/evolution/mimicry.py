@@ -77,9 +77,7 @@ class SocialMimicry:
                     "additionalProperties": False
                 }
             )
-
-            content = response["choices"][0]["message"]["content"]
-            new_style = json.loads(content)
+            new_style = response.get("content", {})
 
             # 验证数据有效性
             if any(new_style.values()):

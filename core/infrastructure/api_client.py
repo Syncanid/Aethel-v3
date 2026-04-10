@@ -111,54 +111,82 @@ class GenericAPIClient:
         return "\n".join(lines)
 
     async def create_chat_completion(self, messages: list, model: str = None, tools: list = None,
-                                     schema: Dict = None, tool_choice: str = "auto") -> Dict:
+                                     schema: Dict = None, require_tools: bool = False) -> Dict:
         """核心 LLM 调用方法"""
         model = model or self.model
         client = self._get_client()
 
         use_prompt_tools = self.config.get("llm.use_prompt_tools", False)
+        use_schema_tools = self.config.get("llm.use_schema_tool_calls", True)
+        arg_mode = self.config.get("llm.tool_call_arg_mode", "object")
 
-        # 当外部调用方同时传入了 Schema 和 Tools，且配置启用了 Prompt Tools 模式时，进行干预
+        tool_choice_val = "auto"
+
+        # 1. Prompt Tools 模式干预
         if use_prompt_tools and tools and schema:
             logger.debug("API_Client: 检测到 Schema 与 Tools 约束碰撞，正在自动执行降维注入...")
-
-            # 1. 生成压缩版 Prompt
             compressed_tools_text = self._compress_tool_schemas(tools)
-
-            # 2. 深度拷贝 messages 以免污染上层调用者
             messages = copy.deepcopy(messages)
 
-            # 3. 将工具定义隐式注入到上下文中
-            system_idx = -1
-            for i, msg in enumerate(messages):
-                if msg.get("role") == "system":
-                    system_idx = i
-                    break
-
+            system_idx = next((i for i, msg in enumerate(messages) if msg.get("role") == "system"), -1)
             if system_idx != -1:
                 messages[system_idx]["content"] += f"\n{compressed_tools_text}"
             else:
                 messages.insert(0, {"role": "system", "content": compressed_tools_text})
 
-            # 4. 彻底剥离原生 tools 传参
             tools = None
-            tool_choice = None
+            tool_choice_val = None
 
+        # 2. Schema Tools 模式干预 (JSON Schema 劫持注入)
+        elif use_schema_tools and tools and schema:
+            logger.debug("API_Client: 启用 Schema Tool Calls，自动重构参数约束...")
+            schema = copy.deepcopy(schema)
+
+            arg_schema = {"type": "object"} if arg_mode == "object" else {
+                "type": "string",
+                "description": "工具的参数对象，JSON格式。"
+            }
+
+            if "properties" not in schema:
+                schema["properties"] = {}
+
+            schema["properties"]["tool_calls"] = {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "arguments": arg_schema
+                    },
+                    "required": ["name", "arguments"],
+                    "additionalProperties": False
+                }
+            }
+
+            if require_tools:
+                if "required" not in schema:
+                    schema["required"] = []
+                schema["required"].append("tool_calls")
+
+            tools = None
+            tool_choice_val = None
+
+        # 3. 原生 Tools 模式处理
+        elif tools and not use_schema_tools:
+            if require_tools:
+                tool_choice_val = "required"
+
+        # --- 兼容性检查与构建 Payload ---
         has_user = any(msg.get("role") == "user" for msg in messages)
         if not has_user:
-            # 倒序查找最后一个 system 消息的索引
-            last_system_idx = -1
-            for i in range(len(messages) - 1, -1, -1):
-                if messages[i].get("role") == "system":
-                    last_system_idx = i
-                    break
-
+            last_system_idx = next((i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") == "system"),
+                                   -1)
             if last_system_idx != -1:
                 logger.warning("未在 messages 中发现 user 角色，将最后一个 system 消息重写为 user 角色以兼容本地模型。")
                 messages[last_system_idx]["role"] = "user"
             else:
                 # 极端异常情况：既没有 user 也没有 system
-                error_msg = "LLM API 异常调用：messages 中既没有 user 角色，也没有 system 角色可供重写，请求被强制终止。"
+                error_msg = "LLM API 异常调用：messages 中既没有 user 也没有 system，请求被终止。"
                 logger.error(error_msg)
                 logger.error(f"异常的 messages 负载: {json.dumps(messages, ensure_ascii=False)}")
                 raise ValueError(error_msg)  # 直接抛出异常，触发 traceback 阻断运行
@@ -175,8 +203,7 @@ class GenericAPIClient:
 
         if tools:
             payload["tools"] = tools
-            payload["tool_choice"] = tool_choice
-
+            payload["tool_choice"] = tool_choice_val
         if schema:
             payload["response_format"] = {
                 "type": "json_schema",
@@ -187,32 +214,80 @@ class GenericAPIClient:
                 }
             }
 
+        # --- 执行请求与洗稿 ---
         try:
-            # 使用 openai 库发送请求
             response = await client.chat.completions.create(**payload)
             result = response.model_dump()
 
-            for choice in result.get("choices", []):
-                message = choice.get("message", {})
-                if message:
-                    reasoning_content = message.get("reasoning_content")
-                    content = message.get("content")
-                    tool_calls = message.get("tool_calls")
+            message = result.get("choices", [{}])[0].get("message", {})
+            reasoning_content = message.get("reasoning_content")
+            content_str = message.get("content") or ""
+            native_tool_calls = message.get("tool_calls") or []
 
-                    # 确保 content 是字符串类型，处理底层的 null 注入
-                    content_str = content if content is not None else ""
+            # 底层错位容错
+            if not content_str.strip() and not native_tool_calls and reasoning_content:
+                message["content"] = reasoning_content
+                content_str = reasoning_content
+            else:
+                message["content"] = content_str
 
-                    # 是否触发了引擎错位 Bug
-                    if not content_str.strip() and not tool_calls and reasoning_content:
-                        # 既没有正文内容，也没有触发工具调用，且存在推理内容
-                        # 这意味着模型的真实输出被错误地塞进了 reasoning 字段
-                        message["content"] = reasoning_content
-                    else:
-                        # 其他所有正常情况（包含有正文、无正文但有工具调用）
-                        # 严格以 content_str 为准，彻底抛弃 reasoning_content 以防止破坏下游 JSON 解析
-                        message["content"] = content_str
+            parsed_content = content_str
+            unified_tool_calls = []
 
-            return result
+            # JSON 解析容错
+            if schema and content_str:
+                cleaned_str = content_str.strip()
+                if "<think>" in cleaned_str and "</think>" in cleaned_str:
+                    # 强行截断思考过程，只取最终输出的 JSON
+                    cleaned_str = cleaned_str.split("</think>")[-1].strip()
+
+                cleaned_str = cleaned_str.replace("```json", "").replace("```", "").strip()
+
+                try:
+                    parsed_content = json.loads(cleaned_str)
+                except json.JSONDecodeError:
+                    logger.warning(f"JSON Parsing failed for schema mode. Content: {content_str}")
+
+            # 提取并归一化 Tool Calls
+            if native_tool_calls:
+                for tc in native_tool_calls:
+                    func = tc.get("function", {})
+                    args = func.get("arguments", "{}")
+                    # 尝试将原生字符串 args 转回 dict
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except json.JSONDecodeError:
+                            pass
+
+                    unified_tool_calls.append({
+                        "id": tc.get("id"),
+                        "name": func.get("name"),
+                        "arguments": args
+                    })
+            elif isinstance(parsed_content, dict) and "tool_calls" in parsed_content:
+                # Schema模式下，提取后直接从 content 中抹除 tool_calls
+                schema_calls = parsed_content.pop("tool_calls", [])
+                for tc in schema_calls:
+                    args = tc.get("arguments", {})
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except json.JSONDecodeError:
+                            pass
+
+                    unified_tool_calls.append({
+                        "id": None,
+                        "name": tc.get("name"),
+                        "arguments": args
+                    })
+
+            # 最终统一返回格式
+            return {
+                "content": parsed_content,
+                "tool_calls": unified_tool_calls,
+                "raw_receive": message
+            }
 
         except Exception as e:
             logger.error(f"LLM API 调用失败: {e}", exc_info=True)
@@ -222,11 +297,10 @@ class GenericAPIClient:
             if self.client:
                 await self.client.close()
             self.client = None
-
             raise
 
     async def create_chat_completion_once(self, messages: str, system_prompt: str = None, model: str = None,
-                                          schema: Dict = None) -> dict:
+                                          schema: Dict = None, tools: list = None, require_tools: bool = False) -> dict:
         msg = []
         if system_prompt:
             msg.append({
@@ -237,8 +311,10 @@ class GenericAPIClient:
             "role": "user",
             "content": messages
         })
-        ret = await self.create_chat_completion(messages=msg, model=model, schema=schema)
-        return ret["choices"][0]["message"]
+
+        return await self.create_chat_completion(
+            messages=msg, model=model, schema=schema, tools=tools, require_tools=require_tools
+        )
 
     async def create_embedding(self, text: str) -> list:
         try:

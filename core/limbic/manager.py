@@ -166,8 +166,7 @@ class LimbicManager:
                     "additionalProperties": False
                 }
             )
-            result = json.loads(resp["choices"][0]["message"]["content"])
-
+            result = resp.get("content", {})
             if result.get("should_wake_up"):
                 logger.info(f"⚡ 潜意识产生冲动: {result.get('impulse_narrative')}")
                 event = OneBotEvent(

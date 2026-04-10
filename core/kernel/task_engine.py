@@ -382,20 +382,30 @@ class TaskEngine:
                     logger.warning(f"Failed to write S2 debug logs: {e}")
 
                 # --- B. 思考 (Call LLM) ---
-                response_msg = await self._call_llm()
+                response_data = await self._call_llm()
                 await self.limbic.consume_action_energy("complex_reasoning")
 
-                content_str = response_msg.get("content", "")
-                if isinstance(content_str, str):
-                    content_str = content_str.replace("```json", "").replace("```", "").strip()
+                # 解析响应
+                parsed_data = response_data.get("content", {})
+                tool_queue = response_data.get("tool_calls", [])
+                raw_receive = response_data.get("raw_receive", {})
+
+                # 回填历史记录
+                if raw_receive.get("tool_calls"):
+                    msg_entry = raw_receive.copy()
+                    if "content" not in msg_entry or msg_entry["content"] is None:
+                        msg_entry["content"] = ""
+                    self.history.append(msg_entry)
                 else:
-                    content_str = "{}"
+                    formatted_content = (json.dumps(parsed_data, ensure_ascii=False)
+                                         if isinstance(parsed_data, dict) else str(parsed_data))
+                    self.history.append({"role": "assistant", "content": formatted_content})
 
-                native_tool_calls = response_msg.get("tool_calls", [])
-
-                # 致命死锁检测 (如果完全一致且没调用原生工具，直接打断)
-                if content_str and content_str == self.last_response_content and not native_tool_calls:
-                    logger.error("⚠️ [System 2] 检测到严重死锁。")
+                # [死锁检测] 将结构化数据序列化后比对
+                content_for_deadlock = (json.dumps(parsed_data, sort_keys=True)
+                                        if isinstance(parsed_data, dict) else str(parsed_data))
+                if content_for_deadlock and content_for_deadlock == self.last_response_content and not tool_queue:
+                    logger.warning("⚠️ [System 2] 检测到严重死锁。")
                     self.history.append({
                         "role": "user",
                         "content": "【SYSTEM ERROR - DEADLOCK DETECTED】系统检测到你输出了与上一次完全一致的内容，且未执行任何有效动作！这会导致无限死循环！请立即改变规划思路，如果方法行不通，请调用 `conclude_task` 汇报失败，绝不许死磕！"
@@ -403,91 +413,47 @@ class TaskEngine:
                     self.last_response_content = ""
                     continue # 直接跳入下一轮让模型反思
 
-                self.last_response_content = content_str
-
-                # 回填历史记录
-                if native_tool_calls:
-                    msg_entry = response_msg.copy()
-                    if "content" not in msg_entry or msg_entry["content"] is None:
-                        msg_entry["content"] = ""
-                    self.history.append(msg_entry)
-                else:
-                    self.history.append({"role": "assistant", "content": content_str})
+                self.last_response_content = content_for_deadlock
 
                 # --- C. 行动 (Parse & Execute Tools) ---
-                tool_execution_queue = []
+                if isinstance(parsed_data, dict):
+                    # 提取并广播 S2 的思考过程
+                    monologue = parsed_data.get("inner_monologue", {})
+                    plan = monologue.get("planning", "正在思考下一步...")
+                    self.event_bus.publish_action(Action(
+                        action="broadcast_log",
+                        params={"content": f"⚙️ [S2 深度思考] {plan}"}
+                    ))
 
-                # 1. 解析 Schema JSON (获取独白和工具)
-                if content_str:
-                    try:
-                        parsed_data = json.loads(content_str)
+                    # 同步 Scratchpad
+                    new_scratchpad = parsed_data.get("scratchpad", None)
+                    if new_scratchpad and isinstance(new_scratchpad, dict):
+                        old_status = self.scratchpad.get("task_status", "normal")
 
-                        # 提取并广播 S2 的思考过程
-                        monologue = parsed_data.get("inner_monologue", {})
-                        plan = monologue.get("planning", "正在思考下一步...")
-                        self.event_bus.publish_action(Action(
-                            action="broadcast_log",
-                            params={"content": f"⚙️ [S2 深度思考] {plan}"}
-                        ))
+                        self.scratchpad.update(new_scratchpad)
+                        self.tool_manager.agent_state = self.scratchpad
 
-                        # 同步 Scratchpad
-                        new_scratchpad = parsed_data.get("scratchpad", None)
+                        new_status = self.scratchpad.get("task_status", "normal")
 
-                        if new_scratchpad and isinstance(new_scratchpad, dict):
-                            old_status = self.scratchpad.get("task_status", "normal")
+                        # 认知状态恶化时触发情绪泄露
+                        if new_status in ["stuck", "frustrated"] and old_status not in ["stuck", "frustrated"]:
+                            logger.warning(f"🧠 [System 2] 认知状态变为 {new_status}，触发情绪泄露！")
+                            frust_event = OneBotEvent(
+                                type=EventType.NOTICE,
+                                detail_type="internal_frustration",
+                                source=source,
+                                message=f"后台任务遇到死胡同了！当前进度：{self.scratchpad.get('progress_summary')}。这让你感到非常烦躁和挫败！你可以主动向用户发一句牢骚，或者直接向用户求助。",
+                                extra={"task_id": task_id, "frustration_level": 2}
+                            )
+                            self.event_bus.publish_event(frust_event)
 
-                            self.scratchpad.update(new_scratchpad)
-                            self.tool_manager.agent_state = self.scratchpad
-
-                            new_status = self.scratchpad.get("task_status", "normal")
-
-                            if new_status in ["stuck", "frustrated"] and old_status not in ["stuck", "frustrated"]:
-                                logger.warning(f"🧠 [System 2] 认知状态变为 {new_status}，触发情绪泄露！")
-                                frust_event = OneBotEvent(
-                                    type=EventType.NOTICE,
-                                    detail_type="internal_frustration",
-                                    source=source,
-                                    message=f"后台任务遇到死胡同了！当前进度：{self.scratchpad.get('progress_summary')}。这让你感到非常烦躁和挫败！你可以主动向用户发一句牢骚，或者直接向用户求助。",
-                                    extra={"task_id": task_id, "frustration_level": 2}
-                                )
-                                self.event_bus.publish_event(frust_event)
-
-                        # 提取 Schema Tools
-                        schema_calls = parsed_data.get("tool_calls", [])
-                        for tc in schema_calls:
-                            tool_execution_queue.append({
-                                "name": tc.get("name"),
-                                "args": tc.get("arguments"),
-                                "id": None
-                            })
-                    except json.JSONDecodeError:
-                        if not native_tool_calls:
-                            self.history.append({"role": "user", "content": "SYSTEM ERROR: JSON Format Error."})
-                            continue
-
-                # 2. 提取 Native Tools
-                if native_tool_calls:
-                    for tc in native_tool_calls:
-                        func = tc.get("function", {}) if isinstance(tc, dict) else getattr(tc, "function", {})
-                        t_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
-                        name = func.get("name") if isinstance(func, dict) else getattr(func, "name", "")
-                        args = func.get("arguments") if isinstance(func, dict) else getattr(func, "arguments", "{}")
-
-                        tool_execution_queue.append({"name": name, "args": args, "id": t_id})
-
-                # 3. 执行工具
-                if tool_execution_queue:
+                # 执行工具列表
+                if tool_queue:
                     self.last_response_used_tools = True
-                    for task in tool_execution_queue:
+                    for task in tool_queue:
                         name = task["name"]
-                        args = task["args"]
+                        args = task["arguments"]
                         t_id = task["id"]
-
-                        if isinstance(args, str):
-                            try:
-                                args = json.loads(args)
-                            except json.JSONDecodeError:
-                                args = {}
 
                         # 正常工具执行
                         try:
@@ -602,75 +568,52 @@ class TaskEngine:
 
     async def _call_llm(self) -> Dict[str, Any]:
         """
-        从 agent.py 完全克隆过来的 LLM 强制 Schema 调用。
-        去掉了不需要的情绪(emotion_check)，保留了 planning 和 scratchpad。
+        S2 LLM 调用
         """
         tools = self.tool_manager.get_tool_schemas()
         if tools is None:
             tools = []
 
-        use_schema_tools = self.config.get("llm.use_schema_tool_calls", True)
-        arg_mode = self.config.get("llm.tool_call_arg_mode", "object")
-
-        properties = {
-            "inner_monologue": {
-                "type": "object",
-                "properties": {
-                    "planning": {"type": "string", "description": "接下来的执行和推理计划。"}
-                },
-                "required": ["planning"],
-                "additionalProperties": False
-            },
-            "scratchpad": {
-                "type": "object",
-                "properties": {
-                    "current_goal": {"type": "string"},
-                    "task_status": {
-                        "type": "string",
-                        "enum": ["normal", "working", "stuck", "frustrated", "completed"],
-                        "description": "当前任务的认知状态。如果思路受阻、方法无效、或迟迟没有进展，请务必将其修改为 stuck 或 frustrated。"
-                    },
-                    "subtasks": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "id": {"type": "integer"},
-                                "description": {"type": "string"},
-                                "status": {"type": "string", "enum": ["pending", "working", "done", "failed"]}
-                            },
-                            "required": ["id", "description", "status"],
-                            "additionalProperties": False
-                        }
-                    },
-                    "progress_summary": {"type": "string", "description": "精简的一句话进度报告，将被用户看到"}
-                },
-                "required": ["current_goal", "task_status", "subtasks", "progress_summary"],
-                "additionalProperties": False
-            }
-        }
-        required_fields = ["inner_monologue", "scratchpad"]
-
-        if use_schema_tools:
-            arg_schema = {"type": "object"} if arg_mode == "object" else {"type": "string"}
-            properties["tool_calls"] = {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "arguments": arg_schema
-                    },
-                    "required": ["name", "arguments"],
-                    "additionalProperties": False
-                }
-            }
-            required_fields.append("tool_calls")
-
         thought_structure = {
             "type": "object",
-            "properties": properties,
-            "required": required_fields,
+            "properties": {
+                "inner_monologue": {
+                    "type": "object",
+                    "properties": {
+                        "planning": {"type": "string", "description": "接下来的执行和推理计划。"}
+                    },
+                    "required": ["planning"],
+                    "additionalProperties": False
+                },
+                "scratchpad": {
+                    "type": "object",
+                    "properties": {
+                        "current_goal": {"type": "string"},
+                        "task_status": {
+                            "type": "string",
+                            "enum": ["normal", "working", "stuck", "frustrated", "completed"],
+                            "description": "当前任务的认知状态。如果思路受阻、方法无效、或迟迟没有进展，请将其修改为 stuck 或 frustrated。"
+                        },
+                        "subtasks": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": {"type": "integer"},
+                                    "description": {"type": "string"},
+                                    "status": {"type": "string", "enum": ["pending", "working", "done", "failed"]}
+                                },
+                                "required": ["id", "description", "status"],
+                                "additionalProperties": False
+                            }
+                        },
+                        "progress_summary": {"type": "string", "description": "精简的一句话进度报告，将被用户看到"}
+                    },
+                    "required": ["current_goal", "task_status", "subtasks", "progress_summary"],
+                    "additionalProperties": False
+                }
+            },
+            "required": ["inner_monologue", "scratchpad"],
             "additionalProperties": False
         }
 
@@ -681,13 +624,12 @@ class TaskEngine:
         ]
 
         # 调用 GenericAPIClient
-        response = await self.api_client.create_chat_completion(
+        return await self.api_client.create_chat_completion(
             messages=sanitized_history,
             tools=tools if tools else None,
             schema=thought_structure,
-            tool_choice="auto" if use_schema_tools else ("auto" if self.last_response_used_tools else "required")
+            require_tools=not self.last_response_used_tools
         )
-        return response["choices"][0]["message"]
 
     @property
     def current_task_id(self):

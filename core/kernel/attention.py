@@ -264,12 +264,9 @@ class AttentionFilter:
                     "additionalProperties": False
                 }
             )
-
-            content_str = response.get("content", "")
-            if "<think>" in content_str and "</think>" in content_str:
-                content_str = content_str.split("</think>")[-1].strip()
-
-            result = json.loads(content_str)
+            result = response.get("content", {})
+            if isinstance(result, str):
+                return ReactionType.OBSERVE
             decision = result.get("decision", "OBSERVE")
             confidence = result.get("confidence", 0.0)
 

@@ -144,15 +144,8 @@ class KnowledgeIngestor:
             ],
             schema=schema
         )
-
-        try:
-            # 解析 JSON
-            content_str = response["choices"][0]["message"]["content"]
-            data = json.loads(content_str)
-            return data.get("knowledge_units", [])
-        except (json.JSONDecodeError, KeyError) as e:
-            logger.error(f"LLM 返回的 JSON 格式错误: {e}", exc_info=True)
-            return []
+        data = response.get("content", {})
+        return data.get("knowledge_units", [])
 
     def _chunk_text_physically(self, text: str, max_chars: int, overlap_lines: int = 15) -> List[str]:
         """

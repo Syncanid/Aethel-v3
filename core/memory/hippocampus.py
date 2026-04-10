@@ -209,7 +209,7 @@ class Hippocampus:
             """
 
             resp = await self.api_client.create_chat_completion([{"role": "user", "content": prompt}])
-            compressed_fact = resp["choices"][0]["message"]["content"].strip()
+            compressed_fact = resp.get("content", "").strip()
 
             # 存入 Semantic
             await self.vector_store.save_vector_memory(SemanticMemory(content=compressed_fact), uid)
@@ -355,8 +355,7 @@ class Hippocampus:
                 ],
                 schema=schema
             )
-
-            data = json.loads(resp["choices"][0]["message"]["content"])
+            data = resp.get("content", {})
             memories = data.get("memories", [])
             graph_edges = data.get("graph_edges", [])
 
@@ -437,7 +436,7 @@ Agent 在使用工具 `{tool_name}` 时失败并触发了自愈机制。
             resp = await self.api_client.create_chat_completion(
                 messages=[{"role": "user", "content": prompt}]
             )
-            rule = resp["choices"][0]["message"]["content"].strip()
+            rule = resp.get("content", "").strip()
 
             # 2. 存入语义记忆 (Semantic Memory)
             # 使用特殊的 tag 或前缀，以便 RAG 检索工具知识时更容易匹配

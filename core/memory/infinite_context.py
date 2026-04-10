@@ -147,12 +147,5 @@ class InfiniteContextManager:
             messages=messages,
             schema=schema
         )
-
-        content_str = response["choices"][0]["message"]["content"]
-
-        # 清理可能存在的 thinking 标签
-        if "<think>" in content_str and "</think>" in content_str:
-            content_str = content_str.split("</think>")[-1].strip()
-
-        data = json.loads(content_str)
+        data = response.get("content", {})
         return data.get("compressed_dialogue", [])
