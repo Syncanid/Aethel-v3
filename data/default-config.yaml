@@ -27,6 +27,11 @@ llm:
   enable_reasoning: false
 
   # 工具调用策略配置
+
+  # 设为 true 时，api_client 将截断原生的 tools 传参，
+  # 并将工具定义压缩为强类型伪代码注入到 System Prompt 头部。
+  use_prompt_tools: false
+
   # true: 在返回的 JSON content 中检测 tool_calls 字段
   # false: 使用 API 原生的 tool_calls 字段返回
   use_schema_tool_calls: false

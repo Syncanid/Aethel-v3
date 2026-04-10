@@ -1,4 +1,5 @@
 # core/infrastructure/api_client.py
+import copy
 import json
 import logging
 from datetime import datetime
@@ -71,11 +72,77 @@ class GenericAPIClient:
         if self.client:
             await self.client.close()
 
+    def _compress_tool_schemas(self, tools: list) -> str:
+        """
+        将低信息密度的 JSON Tool Schema 压缩为高密度伪代码。
+        """
+        if not tools:
+            return ""
+
+        lines = [
+            "\n[SYSTEM DIRECTIVE: AVAILABLE TOOLS]\n你可以使用以下工具，请在返回的 JSON 的 tool_calls 节点中按需调用："]
+        for tool in tools:
+            func = tool.get("function", {})
+            name = func.get("name", "")
+            desc = func.get("description", "").replace("\n", " ")
+            params = func.get("parameters", {}).get("properties", {})
+            required = func.get("parameters", {}).get("required", [])
+
+            param_strs = []
+            for p_name, p_attr in params.items():
+                p_type = p_attr.get("type", "any")
+                is_req = "" if p_name in required else "?"
+                p_desc = p_attr.get("description", "")
+
+                if p_desc:
+                    param_strs.append(f"{p_name}{is_req}: {p_type} /* {p_desc} */")
+                else:
+                    param_strs.append(f"{p_name}{is_req}: {p_type}")
+
+            params_joined = ",\n    ".join(param_strs)
+
+            if len(param_strs) > 1:
+                signature = f"- {name}(\n    {params_joined}\n  )"
+            else:
+                signature = f"- {name}({params_joined})"
+
+            lines.append(f"{signature}\n  用途: {desc}")
+
+        return "\n".join(lines)
+
     async def create_chat_completion(self, messages: list, model: str = None, tools: list = None,
                                      schema: Dict = None, tool_choice: str = "auto") -> Dict:
         """核心 LLM 调用方法"""
         model = model or self.model
         client = self._get_client()
+
+        use_prompt_tools = self.config.get("llm.use_prompt_tools", False)
+
+        # 当外部调用方同时传入了 Schema 和 Tools，且配置启用了 Prompt Tools 模式时，进行干预
+        if use_prompt_tools and tools and schema:
+            logger.debug("API_Client: 检测到 Schema 与 Tools 约束碰撞，正在自动执行降维注入...")
+
+            # 1. 生成压缩版 Prompt
+            compressed_tools_text = self._compress_tool_schemas(tools)
+
+            # 2. 深度拷贝 messages 以免污染上层调用者
+            messages = copy.deepcopy(messages)
+
+            # 3. 将工具定义隐式注入到上下文中
+            system_idx = -1
+            for i, msg in enumerate(messages):
+                if msg.get("role") == "system":
+                    system_idx = i
+                    break
+
+            if system_idx != -1:
+                messages[system_idx]["content"] += f"\n{compressed_tools_text}"
+            else:
+                messages.insert(0, {"role": "system", "content": compressed_tools_text})
+
+            # 4. 彻底剥离原生 tools 传参
+            tools = None
+            tool_choice = None
 
         has_user = any(msg.get("role") == "user" for msg in messages)
         if not has_user:
@@ -130,26 +197,26 @@ class GenericAPIClient:
                 if message:
                     reasoning_content = message.get("reasoning_content")
                     content = message.get("content")
+                    tool_calls = message.get("tool_calls")
 
-                    # 确保 content 是字符串类型，处理 null
+                    # 确保 content 是字符串类型，处理底层的 null 注入
                     content_str = content if content is not None else ""
 
-                    if reasoning_content:
-                        if content_str.strip():
-                            # 场景1：两者都有值，说明是正常的深度思考模型
-                            message["content"] = f"<think>\n{reasoning_content}\n</think>\n{content_str}"
-                        else:
-                            # 场景2：content为空，但reasoning_content有值，说明触发了 LM Studio 错位 Bug
-                            message["content"] = reasoning_content
+                    # 是否触发了引擎错位 Bug
+                    if not content_str.strip() and not tool_calls and reasoning_content:
+                        # 既没有正文内容，也没有触发工具调用，且存在推理内容
+                        # 这意味着模型的真实输出被错误地塞进了 reasoning 字段
+                        message["content"] = reasoning_content
                     else:
-                        # 场景3：普通模型，没有思考字段
+                        # 其他所有正常情况（包含有正文、无正文但有工具调用）
+                        # 严格以 content_str 为准，彻底抛弃 reasoning_content 以防止破坏下游 JSON 解析
                         message["content"] = content_str
 
             return result
 
         except Exception as e:
             logger.error(f"LLM API 调用失败: {e}", exc_info=True)
-            logger.debug(json.dumps(payload, ensure_ascii=False))
+            logger.info("Payload: " + json.dumps(payload, ensure_ascii=False))
 
             # 发生错误时，强制关闭并重置 client，以便下一次请求重建连接
             if self.client:
