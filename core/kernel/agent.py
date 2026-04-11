@@ -196,6 +196,22 @@ class AutonomousAgent:
             await next_call()
             return
 
+        if event.type == EventType.TASK and event.detail_type in [DetailType.TASK_PROGRESS, "task_progress"]:
+            requires_input = event.extra.get("requires_user_input", False)
+            if not requires_input:
+                payload = event.extra.get("task_payload", {})
+                task_id = payload.get("task_id", "unknown")
+                msg = payload.get("progress_msg", "")
+
+                logger.info(f"🔇 [总线拦截] 截获 S2 进度汇报 ({task_id}): {msg}")
+
+                # 仅推送到 UI 监控面板（Dashboard）
+                monitor_registry.register_text_source(
+                    "系统", "S2 后台进度",
+                    lambda m=msg, tid=task_id: f"Task [{tid}]: {m}"
+                )
+                return
+
         if event.type == EventType.TASK and event.detail_type in [
             DetailType.TASK_DISPATCH, "task_dispatch",
             DetailType.TASK_UPDATE, "task_update",

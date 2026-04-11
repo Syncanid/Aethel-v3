@@ -22,20 +22,25 @@ _INTERPRETER_GLOBALS: Dict[str, Any] = {
 
 class CodeSanitizer(ast.NodeTransformer):
     """
-    基础代码安全检查器。
-    拒绝执行可能导致进程退出的高危函数。
+    强化版代码安全检查器。
+    拒绝执行可能导致宿主进程崩溃的高危函数，并通过报错信息引导 LLM 使用安全替代方案。
     """
-    FORBIDDEN_FUNCTIONS = {'exit', 'quit', 'sys.exit'}
+    FORBIDDEN_FUNCTIONS = {
+        'exit': "System exit is forbidden.",
+        'quit': "System quit is forbidden.",
+        'sys.exit': "sys.exit is forbidden.",
+        'os.chdir': "禁止使用 os.chdir()！这会篡改宿主AI进程的全局工作目录导致系统崩溃。\n-> 解决方案：如果需要执行 Git 等外部命令，请在 `subprocess.run()` 中使用 `cwd='目标路径'` 参数；如果是文件读写，请直接拼接绝对路径。",
+        'chdir': "禁止使用 chdir()！这会篡改宿主AI进程的全局工作目录导致系统崩溃。\n-> 解决方案：如果需要执行 Git 等外部命令，请在 `subprocess.run()` 中使用 `cwd='目标路径'` 参数；如果是文件读写，请直接拼接绝对路径。"
+    }
 
     def visit_Call(self, node):
-        if isinstance(node.func, ast.Name):
-            if node.func.id in self.FORBIDDEN_FUNCTIONS:
-                raise SecurityError(f"Forbidden function call: {node.func.id}")
-        elif isinstance(node.func, ast.Attribute):
-            # Check for sys.exit type calls
-            full_name = self._get_attr_name(node.func)
-            if full_name in self.FORBIDDEN_FUNCTIONS:
-                raise SecurityError(f"Forbidden function call: {full_name}")
+        full_name = self._get_attr_name(node.func)
+
+        # 精确匹配全名或短名
+        if full_name in self.FORBIDDEN_FUNCTIONS:
+            error_msg = self.FORBIDDEN_FUNCTIONS[full_name]
+            raise SecurityError(error_msg)
+
         return self.generic_visit(node)
 
     def _get_attr_name(self, node):

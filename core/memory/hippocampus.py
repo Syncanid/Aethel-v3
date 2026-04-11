@@ -255,24 +255,93 @@ class Hippocampus:
                 include=["documents", "ids"]
             )
 
-            if len(old_memories["ids"]) < 5:
+            if not old_memories or len(old_memories.get("ids", [])) < 5:
                 continue  # 太少不值得压缩
 
             content_list = old_memories["documents"]
+
+            # 为原始片段打上索引标签，方便 LLM 进行溯源归类
+            indexed_contents = {str(i): text for i, text in enumerate(content_list)}
+
             prompt = f"""
-你是一个睡眠中的大脑。请将以下零散的短期对话情景记忆，压缩提取为1-2条关于用户的【长期的、概括性的事实或习惯】。
-原始片段：{json.dumps(content_list, ensure_ascii=False)}
-"""
+            你是一个睡眠中的大脑，正在执行记忆的脱水与归档。
+            请将以下零散的短期对话情景记忆，按【核心话题 (Topic)】进行分类聚类。
+            对于每一个话题，请提取出概括性的核心事实与结论。
 
-            resp = await self.api_client.create_chat_completion([{"role": "user", "content": prompt}])
-            compressed_fact = resp.get("content", "").strip()
+            原始对话片段列表 (带索引编号)：
+            {json.dumps(indexed_contents, ensure_ascii=False)}
+            """
+            # 使用 JSON Schema 强制约束 LLM 进行话题聚类和索引映射
+            schema = {
+                "type": "object",
+                "properties": {
+                    "topics": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "topic_name": {"type": "string",
+                                               "description": "话题名称，如 'Python开发探讨'，'游戏偏好'"},
+                                "summary": {"type": "string", "description": "该话题下的核心事实、结论或习惯归纳"},
+                                "source_indexes": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "属于该话题的原始片段索引列表(如 ['0', '2', '5'])"
+                                }
+                            },
+                            "required": ["topic_name", "summary", "source_indexes"],
+                            "additionalProperties": False
+                        }
+                    }
+                },
+                "required": ["topics"],
+                "additionalProperties": False
+            }
 
-            # 存入 Semantic
-            await self.vector_store.save_vector_memory(SemanticMemory(content=compressed_fact), uid)
+            try:
+                resp = await self.api_client.create_chat_completion(
+                    messages=[{"role": "user", "content": prompt}],
+                    schema=schema
+                )
 
-            # 删除旧的 Episodic (遗忘细节)
-            self.database.episodic_collection.delete(ids=old_memories["ids"])
-            logger.info(f"🧠 [睡眠压缩] 提取事实：{compressed_fact}，并删除了 {len(old_memories['ids'])} 条旧细节。")
+                data = resp.get("content", {})
+                topics = data.get("topics", [])
+
+                if not topics:
+                    continue
+
+                saved_count = 0
+                for topic in topics:
+                    t_name = topic.get("topic_name", "未命名话题")
+                    t_summary = topic.get("summary", "")
+                    indexes = topic.get("source_indexes", [])
+
+                    # 提取属于该话题的原始对话记录
+                    raw_texts = []
+                    for idx in indexes:
+                        if idx in indexed_contents:
+                            raw_texts.append(f"- {indexed_contents[idx]}")
+
+                    # 如果没有匹配到原文，跳过
+                    if not raw_texts:
+                        continue
+
+                    raw_combined = "\n".join(raw_texts)
+
+                    # 拼装最终的高密度语义记忆（摘要作为向量检索目标，原文快照作为精准上下文载荷）
+                    final_content = f"【话题归档: {t_name}】\n结论摘要: {t_summary}\n\n[折叠的原始快照]:\n{raw_combined}"
+
+                    # 存入 Semantic
+                    await self.vector_store.save_vector_memory(SemanticMemory(content=final_content), uid)
+                    saved_count += 1
+
+                # 只有成功合并入语义块后，才安全删除旧的 Episodic 细节碎片
+                self.database.episodic_collection.delete(ids=old_memories["ids"])
+                logger.info(
+                    f"🧠 [睡眠压缩] 用户 {uid}: 将 {len(content_list)} 条零散记忆压缩为了 {saved_count} 个话题归档块。")
+
+            except Exception as e:
+                logger.error(f"睡眠压缩执行异常 (用户 {uid}): {e}", exc_info=True)
 
     async def _prune_graph_edges(self):
         """

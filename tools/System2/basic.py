@@ -91,22 +91,6 @@ async def wait(
 
 
 @register()
-async def think(event_bus: EventBus, thought: str) -> None:
-    """
-    [Cognition] 执行思考
-    当你面对复杂问题、需要制定计划、或者反思错误时，必须使用此工具。
-
-    Args:
-        thought: 你的思考过程
-    """
-    event_bus.publish_action(Action(
-        action="broadcast_log",
-        params={"content": f"💭 {thought}"}
-    ))
-    return None
-
-
-@register()
 async def advanced_think(
         api_client: GenericAPIClient,
         tool_manager: ToolManager,

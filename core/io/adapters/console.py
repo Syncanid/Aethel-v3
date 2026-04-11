@@ -49,6 +49,9 @@ class ConsoleAdapter(BaseAdapter):
                 # 发布到总线
                 self.event_bus.publish_event(event)
 
+            except (UnicodeDecodeError, KeyboardInterrupt):
+                logger.info(f"\n[{self.platform_name}] 接收到控制台输入中断信号，已停止监听。")
+                break
             except Exception as e:
                 logger.error(f"控制台输入错误: {e}", exc_info=True)
                 await asyncio.sleep(1)

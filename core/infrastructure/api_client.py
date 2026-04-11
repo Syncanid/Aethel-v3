@@ -24,6 +24,9 @@ class GenericAPIClient:
         self.small_model = config.get("llm.small_model", self.model)
         self.embedding_model = config.get("llm.embedding_model_name")
         self.enable_reasoning = config.get("llm.enable_reasoning", False)
+        self.use_prompt_tools = self.config.get("llm.use_prompt_tools", False)
+        self.use_schema_tools = self.config.get("llm.use_schema_tool_calls", True)
+        self.arg_mode = self.config.get("llm.tool_call_arg_mode", "object")
 
         if not logger.handlers:
             log_file = "data/logs/Openai_" + datetime.now().strftime('%Y-%m-%d')
@@ -36,10 +39,10 @@ class GenericAPIClient:
             # logger.addHandler(handler)
             # logger.propagate = False
 
-            websockets_logger = logging.getLogger("websockets.client")
-            websockets_logger.setLevel(logging.DEBUG)
-            websockets_logger.propagate = False
-            websockets_logger.addHandler(handler)
+            httpcore_logger = logging.getLogger("httpcore")
+            httpcore_logger.setLevel(logging.DEBUG)
+            httpcore_logger.propagate = False
+            httpcore_logger.addHandler(handler)
 
         self.client: Optional[AsyncOpenAI] = None
         self._setup_proxy()
@@ -117,18 +120,14 @@ class GenericAPIClient:
         model = model or self.model
         client = self._get_client()
 
-        use_prompt_tools = self.config.get("llm.use_prompt_tools", False)
-        use_schema_tools = self.config.get("llm.use_schema_tool_calls", True)
-        arg_mode = self.config.get("llm.tool_call_arg_mode", "object")
-
         tool_choice_val = "auto"
 
-        if use_prompt_tools and not use_schema_tools:
+        if self.use_prompt_tools and not self.use_schema_tools:
             logger.warning("配置冲突: use_prompt_tools 必须在 use_schema_tool_calls 开启时才有效。已自动强制开启 Schema 工具模式。")
-            use_schema_tools = True
+            self.use_schema_tools = True
 
         # 1. Prompt Tools 模式干预
-        if use_prompt_tools and tools and schema:
+        if self.use_prompt_tools and tools and schema:
             logger.debug("API_Client: 启用 Prompt Tools，执行注入...")
             compressed_tools_text = self._compress_tool_schemas(tools)
             messages = copy.deepcopy(messages)
@@ -140,11 +139,11 @@ class GenericAPIClient:
                 messages.insert(0, {"role": "system", "content": compressed_tools_text})
 
         # 2. Schema Tools 模式干预
-        if use_schema_tools and tools and schema:
+        if self.use_schema_tools and tools and schema:
             logger.debug("API_Client: 启用 Schema Tool Calls，自动重构参数约束...")
             schema = copy.deepcopy(schema)
 
-            arg_schema = {"type": "object"} if arg_mode == "object" else {
+            arg_schema = {"type": "object"} if self.arg_mode == "object" else {
                 "type": "string",
                 "description": "工具的参数对象，JSON格式。"
             }
@@ -181,7 +180,7 @@ class GenericAPIClient:
             tool_choice_val = None
 
         # 3. 原生 Tools 模式处理
-        elif tools and not use_schema_tools:
+        elif tools and not self.use_schema_tools:
             if require_tools:
                 tool_choice_val = "required"
 
@@ -222,9 +221,6 @@ class GenericAPIClient:
                     "strict": True
                 }
             }
-
-        async with aiofiles.open("data/payload_sent.json", "w", encoding="utf-8") as f:
-            await f.write(json.dumps(payload, ensure_ascii=False, indent=4))
 
         # --- 执行请求与洗稿 ---
         try:
