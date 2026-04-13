@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import os
+import platform
 import time
 from typing import List, Dict, Any, Optional
 
@@ -108,78 +109,103 @@ class TaskEngine:
             # 同时更新一下 Scratchpad 留档
             self.scratchpad["progress_summary"] = f"收到补充信息，正在重新评估..."
 
-    async def save_state(self):
-        """统一持久化 S2 状态与正在执行的任务进度现场"""
+    async def save_checkpoint(self, is_stable: bool = False):
+        """
+        统一持久化 S2 状态与正在执行的任务进度现场
+        实施基于状态机的快照堆栈。仅在关键节点建立可回滚的 Stable Checkpoint。
+        """
         if not self.is_busy:
-            state = {"is_busy": False}
-        else:
-            source_dict = {}
-            if hasattr(self, "_current_task_source") and self._current_task_source:
-                # 兼容原生的 Pydantic Model 和恢复出的 DummySource
-                if hasattr(self._current_task_source, 'model_dump'):
-                    source_dict = self._current_task_source.model_dump()
-                elif hasattr(self._current_task_source, '__dict__'):
-                    source_dict = self._current_task_source.__dict__
-                else:
-                    source_dict = dict(self._current_task_source)
+            return
 
-            state = {
-                "is_busy": self.is_busy,
-                "history": self.history,
-                "scratchpad": self.scratchpad,
-                "last_response_used_tools": self.last_response_used_tools,
-                "last_response_content": self.last_response_content,
-                "current_task_info": {
-                    "task_id": getattr(self, "_current_task_id", ""),
-                    "description": getattr(self, "_current_task_desc", ""),
-                    "params": getattr(self, "_current_task_params", {}),
-                    "source": source_dict
-                },
-                "timestamp": time.time()
+        task_id = getattr(self, "_current_task_id", "UNKNOWN")
+
+        # 序列化当前现场源
+        source_dict = {}
+        if hasattr(self, "_current_task_source") and self._current_task_source:
+            if hasattr(self._current_task_source, 'model_dump'):
+                source_dict = self._current_task_source.model_dump()
+            elif hasattr(self._current_task_source, '__dict__'):
+                source_dict = self._current_task_source.__dict__
+            else:
+                source_dict = dict(self._current_task_source)
+
+        state_payload = {
+            "history": self.history,
+            "scratchpad": self.scratchpad,
+            "last_response_used_tools": self.last_response_used_tools,
+            "last_response_content": self.last_response_content,
+            "current_task_info": {
+                "task_id": task_id,
+                "description": getattr(self, "_current_task_desc", ""),
+                "params": getattr(self, "_current_task_params", {}),
+                "source": source_dict
             }
+        }
+
+        json_str = json.dumps(state_payload, ensure_ascii=False)
+        current_time = time.time()
 
         try:
-            json_str = json.dumps(state, ensure_ascii=False)
             async with self.database.get_connection() as conn:
+                # 1. 插入新快照
                 await conn.execute(
-                    "INSERT OR REPLACE INTO neuro_states (user_id, data_json, last_update) VALUES (?, ?, ?)",
-                    ("UNIFIED_S2_STATE", json_str, time.time())
+                    """
+                    INSERT INTO s2_checkpoints (task_id, timestamp, is_stable, data_json)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (task_id, current_time, is_stable, json_str)
+                )
+
+                # 2. 状态修剪 (Pruning)：为了防止 I/O 与存储爆炸，每个任务最多保留最新的 5 个稳态快照和 1 个最新动态快照
+                await conn.execute(
+                    """
+                    DELETE
+                    FROM s2_checkpoints
+                    WHERE task_id = ?
+                      AND checkpoint_id NOT IN (SELECT checkpoint_id
+                                                FROM s2_checkpoints
+                                                WHERE task_id = ?
+                                                ORDER BY checkpoint_id DESC
+                        LIMIT 6
+                        )
+                    """,
+                    (task_id, task_id)
                 )
                 await conn.commit()
         except Exception as e:
-            logger.error(f"S2 状态保存失败: {e}", exc_info=True)
+            logger.error(f"S2 快照保存失败 (Task: {task_id}): {e}", exc_info=True)
 
-    async def load_state(self) -> bool:
-        """恢复 S2 完整执行现场，实现任务断点续传"""
+    async def load_latest_checkpoint(self) -> bool:
+        """
+        系统灾难恢复时，拉取该任务最新的 Checkpoint
+        """
         try:
             async with self.database.get_connection() as conn:
                 cursor = await conn.execute(
-                    "SELECT data_json FROM neuro_states WHERE user_id=?",
-                    ("UNIFIED_S2_STATE",)
+                    "SELECT data_json FROM s2_checkpoints ORDER BY timestamp DESC LIMIT 1"
                 )
                 row = await cursor.fetchone()
                 if row:
                     state = json.loads(row[0])
-                    self.is_busy = state.get("is_busy", False)
 
-                    if self.is_busy:
-                        self.history = state.get("history", [])
-                        self.scratchpad.update(state.get("scratchpad", {}))
-                        self.last_response_used_tools = state.get("last_response_used_tools", True)
-                        self.last_response_content = state.get("last_response_content", "")
+                    self.history = state.get("history", [])
+                    self.scratchpad.update(state.get("scratchpad", {}))
+                    self.last_response_used_tools = state.get("last_response_used_tools", True)
+                    self.last_response_content = state.get("last_response_content", "")
 
-                        info = state.get("current_task_info", {})
-                        self._current_task_id = info.get("task_id")
-                        self._current_task_desc = info.get("description")
-                        self._current_task_params = info.get("params")
+                    info = state.get("current_task_info", {})
+                    self._current_task_id = info.get("task_id")
+                    self._current_task_desc = info.get("description")
+                    self._current_task_params = info.get("params")
 
-                        source_dict = info.get("source", {})
-                        self._current_task_source = DummySource(source_dict) if source_dict else None
+                    source_dict = info.get("source", {})
+                    self._current_task_source = DummySource(source_dict) if source_dict else None
 
-                        logger.info(f"🔄 发现中断的 S2 任务 [{self._current_task_id}]，准备恢复现场...")
-                        return True
+                    self.is_busy = True
+                    logger.info(f"🔄 S2 现场已从最新快照恢复 [{self._current_task_id}]")
+                    return True
         except Exception as e:
-            logger.error(f"S2 状态恢复失败: {e}", exc_info=True)
+            logger.error(f"S2 快照恢复失败: {e}", exc_info=True)
         return False
 
     def _prune_context(self):
@@ -218,7 +244,7 @@ class TaskEngine:
         logger.info("⚙️ Task Engine (System 2) 已启动...")
         await self.tool_manager.initialize()
 
-        if await self.load_state():
+        if await self.load_latest_checkpoint():
             self._running_task_coro = asyncio.create_task(
                 self._execute_long_loop(
                     self._current_task_id,
@@ -330,7 +356,7 @@ class TaskEngine:
                     "content": f"【任务派发】\n目标: {description}\n上下文参数: {json.dumps(params, ensure_ascii=False)}\n请通过工具分步执行，并输出最终结论。"
                 })
 
-                await self.save_state()  # 保存全新任务的第一帧
+                await self.save_checkpoint(is_stable=True)
             else:
                 # 2. 恢复启动：直接沿用缓存中的记录
                 self.tool_manager.agent_state = self.scratchpad
@@ -347,11 +373,9 @@ class TaskEngine:
                 # 告知 Agent 发生了灾难恢复
                 self.history.append({
                     "role": "user",
-                    "content": "【系统事件】系统刚刚经历了一次重启。你之前执行到一半的任务进度、历史和记忆已被完全恢复。请基于上面的记忆继续执行当前任务。"
+                    "content": "【系统事件】系统刚刚经历了一次重启或主动回滚。你之前的任务进度、历史和记忆已被全盘恢复。请基于上面的记忆继续执行当前任务。"
                 })
-                await self.save_state()
-
-            error_count = 0  # 追踪工具报错
+                await self.save_checkpoint(is_stable=True)
 
             # ================= 长循环开始 =================
             while True:
@@ -360,16 +384,21 @@ class TaskEngine:
                 self._prune_context()
 
                 # --- A. 更新 System Prompt 与状态同步 ---
+                env_info = self._get_environment_context(task_id)
+
                 scratchpad_dump = json.dumps(self.scratchpad, indent=2, ensure_ascii=False)
                 final_system_prompt = (
                     f"{base_system_prompt}\n\n"
+                    f"## Environment Context\n"
+                    f"你当前处于以下执行环境中：\n"
+                    f"{env_info}\n\n"
                     f"## Scratchpad\n"
                     f"这是你当前内部状态，必须维护和更新：\n{scratchpad_dump}"
                 )
                 self.history[0]["content"] = final_system_prompt
 
                 # 将目前 scratchpad 里的进度同步给外部全局看版
-                current_progress = self.scratchpad.get("progress_summary", f"执行中)")
+                current_progress = self.scratchpad.get("progress_summary", "执行中...")
                 await global_task_registry.update_progress(task_id, current_progress)
 
                 try:
@@ -410,11 +439,13 @@ class TaskEngine:
                         "role": "user",
                         "content": "【SYSTEM ERROR - DEADLOCK DETECTED】系统检测到你输出了与上一次完全一致的内容，且未执行任何有效动作！这会导致无限死循环！请立即改变规划思路，如果方法行不通，请调用 `conclude_task` 汇报失败，绝不许死磕！"
                     })
-                    continue # 直接跳入下一轮让模型反思
+                    continue  # 直接跳入下一轮让模型反思
 
                 self.last_response_content = content_for_deadlock
 
                 # --- C. 行动 (Parse & Execute Tools) ---
+                has_valid_scratchpad = False
+
                 if isinstance(parsed_data, dict):
                     # 提取并广播 S2 的思考过程
                     monologue = parsed_data.get("inner_monologue", {})
@@ -427,6 +458,7 @@ class TaskEngine:
                     # 同步 Scratchpad
                     new_scratchpad = parsed_data.get("scratchpad", None)
                     if new_scratchpad and isinstance(new_scratchpad, dict):
+                        has_valid_scratchpad = True  # 标记合法解析
                         old_status = self.scratchpad.get("task_status", "normal")
 
                         self.scratchpad.update(new_scratchpad)
@@ -436,13 +468,13 @@ class TaskEngine:
 
                         # 认知状态恶化时触发情绪泄露
                         if new_status in ["stuck", "frustrated"] and old_status not in ["stuck", "frustrated"]:
-                            logger.warning(f"🧠 [System 2] 认知状态变为 {new_status}，触发情绪泄露！")
+                            logger.warning(f"🧠 [System 2] 认知状态恶化为 {new_status}，触发情绪泄露！")
                             frust_event = OneBotEvent(
                                 type=EventType.NOTICE,
                                 detail_type="internal_frustration",
                                 source=source,
-                                message=f"后台任务遇到死胡同了！当前进度：{self.scratchpad.get('progress_summary')}。这让你感到非常烦躁和挫败！你可以主动向用户发一句牢骚，或者直接向用户求助。",
-                                extra={"task_id": task_id, "frustration_level": 2}
+                                message=f"后台任务陷入僵局！当前进度：{self.scratchpad.get('progress_summary')}。这让你感到非常受挫！可以向用户发一句牢骚，或者直接求助。",
+                                extra={"task_id": task_id, "frustration_level": 3}
                             )
                             self.event_bus.publish_event(frust_event)
 
@@ -462,24 +494,16 @@ class TaskEngine:
                             ))
 
                             await global_task_registry.update_progress(task_id, f"调用工具: {name}...")
+
+                            # 执行工具，内部包含了重试与防抖
                             result = await self.tool_manager.execute_tool(name, args)
-                            error_count = 0  # 成功执行则重置挫败感
+
                         except Exception as e:
-                            result = f"Error: {str(e)}"
-                            error_count += 1  # 记录连续失败次数
+                            # 这里只捕获 ToolManager 自身的致命崩溃
+                            result = f"【SYSTEM CRASH】引擎调用栈致命错误: {str(e)}"
+                            logger.error(f"🔧 [System 2] 工具中间件崩溃: {e}")
 
-                            # 失败达到阈值，触发情绪泄露给 S1
-                            if error_count >= 2:
-                                logger.warning(f"🔧 [System 2] 工具 {name} 连续失败，触发挫败感泄露！")
-                                frust_event = OneBotEvent(
-                                    type=EventType.NOTICE,
-                                    detail_type="internal_frustration",
-                                    source=source,
-                                    message=f"后台任务遇到大麻烦了！执行 {name} 连续报错：{str(e)[:50]}... 这让你感到非常烦躁和挫败！",
-                                    extra={"task_id": task_id, "frustration_level": error_count}
-                                )
-                                self.event_bus.publish_event(frust_event)
-
+                        # 将安全的返回结果记录进历史
                         if t_id:
                             self.history.append(
                                 {"role": "tool", "tool_call_id": t_id, "name": name, "content": str(result)})
@@ -488,7 +512,7 @@ class TaskEngine:
                 else:
                     self.last_response_used_tools = False
 
-                await self.save_state()
+                await self.save_checkpoint(is_stable=has_valid_scratchpad)
 
                 if self.task_status["finished"]:
                     break
@@ -512,7 +536,7 @@ class TaskEngine:
                 }}
             )
             self.event_bus.publish_event(complete_event)
-            await self.save_state()
+            await self.save_checkpoint(is_stable=False)
         finally:
             # 任务结束，打包并持久化黑匣子记录
             record_dir = "data/task_records"
@@ -559,11 +583,123 @@ class TaskEngine:
             except Exception as e:
                 logger.error(f"任务归档失败: {e}")
 
-            self.tool_manager.unmount_skill_tools()
+            from tools.System2.terminal_ops import TERMINAL_SESSIONS
+            if task_id in TERMINAL_SESSIONS:
+                logger.info(f"🧹 [System 2] 自动清理任务 {task_id} 残留的终端会话。")
+                session = TERMINAL_SESSIONS.pop(task_id)
+                try:
+                    if session["type"] == "ssh":
+                        session["process"].terminate()
+                        session["conn"].close()
+                    else:
+                        session["process"].terminate()
+                except Exception:
+                    pass
 
+            self.tool_manager.unmount_skill_tools()
             self.is_busy = False
-            await self.save_state()  # 确保清理现场
+            await self.save_checkpoint(is_stable=False)
             self._running_task_coro = None
+
+    async def rollback_to_last_stable(self, new_reason: str) -> str:
+        """
+        主动状态回滚机制。
+        寻找当前任务倒数第一个或第二个稳定快照，并覆盖当前现场。
+        在覆盖当前污染历史前，提取所有已知的失败教训，防止模型在同一节点无限震荡。
+        """
+        task_id = getattr(self, "_current_task_id", "UNKNOWN")
+
+        # 1. 在当前被污染的 history 被销毁前，打捞该节点上所有既往的“回滚记录”
+        previous_lessons = []
+        for msg in self.history:
+            if msg.get("role") == "tool" and msg.get("name") == "revert_to_checkpoint":
+                # 提取历史中已经积累的失败警告
+                content = msg.get("content", "")
+                if "失败原因：" in content:
+                    extracted = content.split("失败原因：")[-1].split("\n")[0].strip()
+                    previous_lessons.append(extracted)
+
+        try:
+            async with self.database.get_connection() as conn:
+                # 倒序查找最近的 stable 快照。由于最新的 stable 可能就是刚触发错误的上一刻，
+                # 为了确保真正退回到分岔路口，通常需要提取 LIMIT 1
+                cursor = await conn.execute(
+                    """
+                    SELECT data_json
+                    FROM s2_checkpoints
+                    WHERE task_id = ?
+                      AND is_stable = 1
+                    ORDER BY timestamp DESC LIMIT 1
+                    """,
+                    (task_id,)
+                )
+                row = await cursor.fetchone()
+
+                if row:
+                    state = json.loads(row[0])
+
+                    # 2. 物理覆盖：销毁当前污染时间线
+                    self.history = state.get("history", [])
+                    self.scratchpad.update(state.get("scratchpad", {}))
+                    self.last_response_used_tools = False
+
+                    # 3. 合并新旧教训，构建“记忆残留”黑匣子
+                    all_lessons = previous_lessons + [new_reason]
+
+                    lessons_text = "\n".join([f"- 尝试 {i + 1} 失败原因：{r}" for i, r in enumerate(all_lessons)])
+
+                    # 构造强制注入的 Prompt 返回值
+                    combined_warning = (
+                        f"【SYSTEM INTERVENTION - TIMELINE REVERTED】\n"
+                        f"系统已将状态回滚到发生错误之前的安全节点。\n"
+                        f"⚠️ 注意：在此分岔口，你已经在平行的废弃时间线中遭遇了 {len(all_lessons)} 次严重失败，教训如下：\n"
+                        f"{lessons_text}\n\n"
+                        f"最高指令：在接下来的 planning 中，你【必须彻底放弃】上述所有尝试过的思路！如果所有可能路径均已封死，请立即调用 ask_system1_for_help 或 conclude_task(status='failure')，严禁再次重试上述逻辑！"
+                    )
+                    logger.warning(f"⏪ [System 2] 认知回退完成，携带 {len(all_lessons)} 条残存记忆。")
+                    return combined_warning
+                else:
+                    return "【SYSTEM ERROR】无稳定状态可供回滚。"
+        except Exception as e:
+            logger.error(f"S2 回滚异常: {e}", exc_info=True)
+            return f"【SYSTEM CRASH】回滚过程崩溃: {str(e)}"
+
+    def _get_environment_context(self, task_id: str) -> str:
+        """
+        [感知引擎] 实时提取当前任务挂载的终端环境元数据。
+        """
+        native_os = platform.system()
+        native_node = platform.node()
+
+        # 默认基础信息
+        context = [
+            f"- 宿主系统: {native_os} ({os.name})",
+            f"- 宿主节点: {native_node}"
+        ]
+
+        # 检查是否有活跃的终端会话
+        from tools.System2.terminal_ops import TERMINAL_SESSIONS
+        session = TERMINAL_SESSIONS.get(task_id)
+        if not session:
+            shell_type = "PowerShell" if native_os == "Windows" else "Bash"
+            context.append(f"- 当前终端: 未初始化 (将默认使用 {shell_type})")
+        else:
+            s_type = session.get("type", "unknown")
+            if s_type == "ssh":
+                conn = session.get("conn")
+                # 提取 SSH 连接对象信息
+                peer_info = f"{conn._username}@{conn._host}:{conn._port}" if conn else "Unknown SSH"
+                context.append(f"- 执行模式: **REMOTE SSH SESSION**")
+                context.append(f"- 连接对象: `{peer_info}`")
+                context.append("- 语法约束: 必须使用目标机器的 Shell 语法 (通常为 Bash)")
+            else:
+                shell_type = "PowerShell" if native_os == "Windows" else "Bash"
+                context.append(f"- 执行模式: **LOCAL TERMINAL**")
+                context.append(f"- 活跃 Shell: {shell_type}")
+                if native_os == "Windows":
+                    context.append("- 警告: 当前为 PowerShell 环境，禁用 Bash 专属操作符，复杂命令请用 `cmd /c` 桥接。")
+
+        return "\n".join(context)
 
     async def _call_llm(self) -> Dict[str, Any]:
         """
@@ -593,6 +729,11 @@ class TaskEngine:
                             "enum": ["normal", "working", "stuck", "frustrated", "completed"],
                             "description": "当前任务的认知状态。如果思路受阻、方法无效、或迟迟没有进展，请将其修改为 stuck 或 frustrated。"
                         },
+                        "path_viability": {
+                            "type": "string",
+                            "enum": ["high", "medium", "dead_end"],
+                            "description": "评估当前执行路径的可行性。如果连续遇到环境报错、找不到元素或逻辑不通，必须将其设为 dead_end。"
+                        },
                         "subtasks": {
                             "type": "array",
                             "items": {
@@ -606,9 +747,9 @@ class TaskEngine:
                                 "additionalProperties": False
                             }
                         },
-                        "progress_summary": {"type": "string", "description": "精简的一句话进度报告，将被用户看到"}
+                        "progress_summary": {"type": "string", "description": "精简的一句话进度报告，将被用户看到"},
                     },
-                    "required": ["current_goal", "task_status", "subtasks", "progress_summary"],
+                    "required": ["current_goal", "path_viability", "task_status", "subtasks", "progress_summary"],
                     "additionalProperties": False
                 }
             },

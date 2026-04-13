@@ -1,4 +1,4 @@
-# tools/code_interpreter.py
+# tools/System2/code_interpreter.py
 import ast
 import asyncio
 import contextlib
@@ -82,17 +82,20 @@ async def inspect_system_dependencies(tool_manager=None) -> str:
 @register()
 async def run_python_code(
         code: str,
+        purpose: str,
         timeout: Optional[int] = 30,
         reset_session: Optional[bool] = False,
         tool_manager: ToolManager = None
 ) -> Dict[str, Any]:
     """
-    [Omnipotent] 执行 Python 代码的沙箱解释器。支持变量状态保持 (REPL 模式)。
+    [Omnipotent] 执行 Python 代码的沙箱解释器，并带有大文本提炼引擎。支持变量状态保持 (REPL 模式)。
     可用于：复杂数学计算、数据处理、文本分析、生成算法等。
     注意：底层的 dependency_map (如 config, database, agent_state 等) 已经被隐式注入为全局变量，可直接在代码中使用。
 
     Args:
         code: 要执行的 Python 代码字符串。
+        purpose: 执行这段代码的目的是什么？如果输出超长矩阵或数据结构，
+                    系统将调用小模型提炼引擎，严格根据此目的进行长文本过滤。
         timeout: 执行超时时间（秒），默认 30秒。
         reset_session: 是否重置解释器状态（清空之前定义的变量），默认为 False。
 

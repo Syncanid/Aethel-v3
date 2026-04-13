@@ -1,4 +1,6 @@
 # core/tool_manager/aggregator.py
+import asyncio
+import hashlib
 import importlib
 import inspect
 import json
@@ -39,6 +41,10 @@ class ToolManager:
 
         # 自愈配置
         self.max_self_heal_attempts = 1
+
+        # 用于防死锁检测的签名记录
+        self._last_failed_signature: Optional[str] = None
+        self._failed_signature_count = 0
 
         # 依赖注入容器
         self.dependency_map = {
@@ -179,88 +185,98 @@ class ToolManager:
         """
         统一执行入口，包含自愈机制。
         """
-        try:
-            # 实际执行逻辑
-            result = await self._execute_tool_internal(name, args, context)
+        # --- 1. 计算调用签名，防死锁拦截 ---
+        args_str = json.dumps(args, sort_keys=True)
+        current_signature = hashlib.md5(f"{name}:{args_str}".encode()).hexdigest()
 
-            # [Step 3] 结果检查：有些工具可能不抛异常，而是返回包含 "status": "error" 的 JSON 字符串
-            # 针对 code_interpreter 特殊处理
-            if isinstance(result, (dict, str)):
-                res_str = str(result)
-                if name == "run_python_code":
-                    # 解析返回的 dict 检查 status
-                    if isinstance(result, dict) and result.get("status") == "error":
-                        raise RuntimeError(f"Interpreter Error: {result.get('stderr')}")
-                    if "Syntax Error" in res_str or "Traceback" in res_str:
-                        raise RuntimeError(f"Code Execution Error: {res_str}")
+        # 检查模型是否在机械重复上一次的失败动作
+        if current_signature == self._last_failed_signature:
+            self._failed_signature_count += 1
+            if self._failed_signature_count >= 2:
+                logger.warning(f"🛑 [防死锁熔断] 检测到模型连续重复提交必然失败的动作: {name}")
+                return (
+                    f"【SYSTEM ERROR - DEADLOCK INTERCEPTED】防死锁系统已拦截此请求！\n"
+                    f"你正在重复执行与上一次完全相同的错误操作，这证明你的策略已陷入无限死循环。\n"
+                )
+        else:
+            # 如果动作改变，重置死锁计数器
+            self._last_failed_signature = None
+            self._failed_signature_count = 0
 
-            return result
+        # --- 2. 瞬态错误重试与分类执行环 ---
+        max_retries = 3
+        base_delay = 1.0
 
-        except Exception as e:
-            logger.error(f"工具 {name} 执行异常: {e}", exc_info=True)
+        for attempt in range(max_retries):
+            try:
+                result = await self._execute_tool_internal(name, args, context)
 
-            # 判断是否值得自愈
-            # 仅当错误看起来像参数错误时才重试
-            error_msg = str(e)
-            should_heal = False
-            keywords = ["argument", "missing", "type", "value", "json", "format", "invalid"]
-            if any(k in error_msg.lower() for k in keywords):
-                should_heal = True
+                # 检查内置状态错误 (如 Code Interpreter 的特殊返回)
+                if isinstance(result, dict) and result.get("status") == "error":
+                    raise RuntimeError(f"Semantic/Execution Error: {result.get('stderr')}")
+                if isinstance(result, str) and ("Syntax Error" in result or "Traceback" in result):
+                    raise RuntimeError(f"Semantic/Execution Error: {result}")
 
-            # 排除明显的环境错误
-            if "timeout" in error_msg.lower() or "connection" in error_msg.lower() or "404" in error_msg:
-                should_heal = False
+                # 成功执行，清除失败记录并正常返回
+                self._last_failed_signature = None
+                self._failed_signature_count = 0
+                return result
 
-            # 触发自愈回路
-            if allow_self_heal and self.max_self_heal_attempts > 0 and should_heal:
-                logger.info(f"🩹 触发自愈回路: {name}")
+            except Exception as e:
+                error_msg = str(e)
+                error_lower = error_msg.lower()
 
-                # 1. 尝试自愈
-                fixed_args = await self._attempt_self_heal(name, args, error_msg)
+                # A. 瞬态错误 - 指数退避静默重试
+                is_transient = any(k in error_lower for k in ["timeout", "connection", "502", "503", "rate limit", "too many requests"])
+                if is_transient:
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2 ** attempt)
+                        logger.warning(f"🌐 瞬态网络错误 [{name}] ({error_msg})，{delay}s 后进行第 {attempt+1} 次重试...")
+                        await asyncio.sleep(delay)
+                        continue
+                    else:
+                        # 重试耗尽，降级为终端错误
+                        self._last_failed_signature = current_signature
+                        return f"【Terminal Error】网络或服务持续不可用。错误详情：{error_msg}。请暂时放弃使用此工具。"
 
-                if fixed_args:
-                    logger.info(f"🩹 自愈成功，参数已修正。")
+                # B. 终端错误 (Terminal Error) - 直接拦截
+                is_terminal = any(k in error_lower for k in ["permission denied", "unauthorized", "401", "403", "not found"])
+                if is_terminal:
+                    self._last_failed_signature = current_signature
+                    return f"【Terminal Error】权限被拒绝或目标不存在。错误详情：{error_msg}。请改变计划。"
 
-                    # === Step 2: 让模型“知道” (Awareness) ===
-                    # 获取 Agent 实例
-                    agent = self.dependency_map.get("agent")
-                    learned_rule = None
+                # C. 语义错误 (Semantic Error) - 触发自愈
+                self._last_failed_signature = current_signature
+                should_heal = any(k in error_lower for k in ["argument", "missing", "type", "value", "json", "format", "invalid"])
 
-                    from core.kernel.agent import AutonomousAgent
-                    if agent and isinstance(agent, AutonomousAgent):
-                        # 异步触发学习过程 (不阻塞当前执行)
-                        # 我们希望 Agent 记住这个教训，所以调用 Hippocampus
-                        if hasattr(agent, "hippocampus"):
-                            # 使用 asyncio.create_task 并行处理学习，不增加用户等待时间
-                            # 但为了在本次回复中就能体现“我学会了”，也可以 await
-                            learned_rule = await agent.hippocampus.review_tool_mistake(
-                                tool_name=name,
-                                original_args=args,
-                                error=error_msg,
-                                fixed_args=fixed_args
-                            )
+                if allow_self_heal and self.max_self_heal_attempts > 0 and should_heal:
+                    logger.info(f"🩹 触发参数级自愈回路: {name}")
+                    fixed_args = await self._attempt_self_heal(name, args, error_msg)
 
-                        # 向 Agent 的思维流 (History) 插入系统通知
-                        # 这让 Agent 在接下来的思考中知道刚才发生了什么
-                        notice_content = f"【系统自愈报告】工具 `{name}` 初次调用失败（{error_msg}）。系统已自动修正参数并重试。"
-                        if learned_rule:
-                            notice_content += f"\n💡 新习得经验: {learned_rule}"
+                    if fixed_args:
+                        # 解耦式的认知更新：尝试获取 TaskEngine 或 Agent 的 history
+                        notice_content = f"【系统自愈报告】工具 `{name}` 初次调用由于格式错误失败。系统已自动修正参数重试。"
 
-                        agent.history.append({
-                            "role": "system",
-                            "content": notice_content,
-                            "metadata": {"ephemeral": True}  # 标记为临时消息，不一定永久归档
-                        })
+                        task_engine = self.dependency_map.get("task_engine")
+                        if task_engine and hasattr(task_engine, "history"):
+                            task_engine.history.append({"role": "system", "content": notice_content})
+                        else:
+                            agent = self.dependency_map.get("agent")
+                            if agent and hasattr(agent, "history"):
+                                agent.history.append({"role": "system", "content": notice_content})
 
-                    # === Step 3: 重试 (Retry) ===
-                    # 递归调用，但关闭自愈以防止无限递归
-                    retry_result = await self.execute_tool(name, fixed_args, context, allow_self_heal=False)
+                        retry_result = await self.execute_tool(name, fixed_args, context, allow_self_heal=False)
+                        return f"【系统提示：原参数错误，系统已自动修正为 {fixed_args}】\n执行结果:\n{retry_result}"
 
-                    # 返回结果时带上标记，表明这是修复后的结果
-                    return f"[Self-Healed] {retry_result}"
+                # 彻底失败，返回带有明确指导的语义错误
+                return (
+                    f"【Semantic Error】工具调用逻辑失败。错误详情：{error_msg}\n"
+                    f"请反思 `inner_monologue` 中的逻辑，修改参数后重试，或转换策略。"
+                )
 
-            # 无法自愈，返回原始错误
-            return f"Error executing '{name}': {error_msg}"
+        self._last_failed_signature = current_signature
+        logger.error(f"🚨 [System Crash] 工具 {name} 的执行流异常跌穿了重试循环！")
+        return f"【SYSTEM FATAL】工具执行流崩溃，重试循环未能产生任何有效状态。"
 
     async def _execute_tool_internal(self, name: str, args: Dict[str, Any], context: Dict[str, Any] = None):
         """内部执行逻辑 """

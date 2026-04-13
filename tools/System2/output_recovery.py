@@ -14,10 +14,12 @@ async def read_full_output(receipt_id: str) -> str:
         receipt_id: 系统提示给你的凭证号 (如 'out_a1b2c3d4')
     """
     content = ToolOutputCache.get(receipt_id)
-    if not content:
-        return f"错误：凭证号 {receipt_id} 无效或已过期被清理。"
-
-    return f"【凭证 {receipt_id} 的完整原始数据】:\n{content}"
+    if content:
+        # 给模型一个硬性警告，防止其把几万字全吃进去
+        if len(content) > 5000:
+            return f"【警告】原始输出长达 {len(content)} 字符，直接读取会导致你遗忘上下文。\n强烈建议改用 `refine_tool_output` 工具更换搜索目的。"
+        return content
+    return f"【错误】找不到凭证号 {receipt_id} 的缓存数据，可能已过期。"
 
 
 @register()
@@ -32,8 +34,7 @@ async def refine_tool_output(receipt_id: str, new_purpose: str) -> str:
         new_purpose: 你现在想从这份数据里找什么？(例如："忽略代码实现，只帮我总结出它的报错码大全")
     """
     content = ToolOutputCache.get(receipt_id)
-    if not content:
-        return f"错误：凭证号 {receipt_id} 无效或已过期被清理。"
-
-    refined = await ToolOutputCache.refine_content(content, new_purpose)
-    return f"【基于新目的 '{new_purpose}' 的提炼结果】:\n{refined}"
+    if content:
+        refined = await ToolOutputCache.refine_content(content, new_purpose)
+        return f"重新提炼结果 ({new_purpose}):\n\n{refined}"
+    return f"【错误】找不到凭证号 {receipt_id} 的缓存数据。"

@@ -51,6 +51,24 @@ async def report_task_progress(
 
 
 @register()
+async def revert_to_checkpoint(
+        reason: str,
+        task_engine: TaskEngine = None
+) -> str:
+    """
+    当任务陷入死胡同、遇到无法解决的逻辑错误，或者你意识到当前的探索路径完全错误时，调用此工具。
+    它将清除当前所有被污染的记忆和状态，将系统时间线倒退回上一个安全、稳定的检查点。
+
+    :param reason: 必须详细说明为什么这条路走不通（例如：“目标文件夹不存在，且尝试创建失败，该方案不可行”）。系统将记录这个教训。
+    """
+    # 将当前的失败原因透传给引擎，引擎负责合并所有的失败记忆并执行物理回滚
+    injection_prompt = await task_engine.rollback_to_last_stable(new_reason=reason)
+
+    # 这一长串带有所有失败历史的 Prompt 将作为本工具的 output 挂载到刚恢复的纯净 history 末尾
+    return injection_prompt
+
+
+@register()
 async def ask_system1_for_help(
         question: str,
         event_bus: EventBus = None,

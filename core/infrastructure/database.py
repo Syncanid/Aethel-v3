@@ -47,6 +47,39 @@ SCHEMA_SQL = {
                         REAL
                     )
                     """,
+    "s2_checkpoints": """
+                      CREATE TABLE IF NOT EXISTS s2_checkpoints
+                      (
+                          task_id
+                          TEXT
+                          NOT
+                          NULL,
+                          checkpoint_id
+                          INTEGER
+                          PRIMARY
+                          KEY
+                          AUTOINCREMENT,
+                          timestamp
+                          REAL
+                          NOT
+                          NULL,
+                          is_stable
+                          BOOLEAN
+                          NOT
+                          NULL,
+                          data_json
+                          TEXT
+                          NOT
+                          NULL,
+                          INDEX
+                          idx_task_time
+                      (
+                          task_id,
+                          timestamp
+                          DESC
+                      )
+                          );
+                      """,
     "social_users": """
                     CREATE TABLE IF NOT EXISTS social_users
                     (
