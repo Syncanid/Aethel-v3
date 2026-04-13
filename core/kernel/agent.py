@@ -705,14 +705,12 @@ class AutonomousAgent:
             target_category = event.extra.get("target_category", "任何人")
             narrative = event.extra.get("narrative", "")
 
-            return (f"【潜意识冲动涌现】\n"
+            return (f"【潜意识冲动爆发】\n"
                     f"你突然产生了一个强烈的内部冲动：\"{narrative}\"\n"
                     f"你潜意识里希望倾诉的对象分类是：[{target_category}]。\n"
-                    f"【决策要求】：\n"
-                    f"1. 你是否记得任何属于该分类（如管理员或某个群聊）的具体ID？\n"
-                    f"2. 评估当前的时间和语境，现在发消息合适吗？\n"
-                    f"决策：如果你明确知道该发给谁且决定行动，请直接调用 `send_message` 工具主动发起对话。\n"
-                    f"如果你想不起来具体ID，或者认为现在不适合打扰别人，请调用 `wait` 压制这个冲动并继续休眠。")
+                    f"你有两个选择：\n"
+                    f"1. 顺应本能：找到一个自然、甚至可以有些笨拙或唐突的借口，直接调用 `send_message` 或其他行动工具去满足它。\n"
+                    f"2. 强行压制：如果你坚持认为现在不适合打扰别人，可调用 `suppress_urge` 强行忍耐。但这不会让需求消失，只会引发精神内耗，并在未来引发更严重的反弹！")
 
         # 2. 处理通知 (Notice)
         if event.type == EventType.NOTICE:
@@ -731,6 +729,7 @@ class AutonomousAgent:
             if event.detail_type == "friend":
                 return f"【好友申请】收到来自用户 {event.source.user_id} 的好友申请。"
 
+        # 3. 处理任务 (Task)
         if event.type == EventType.TASK:
             payload = event.extra.get("task_payload", {})
             task_id = payload.get("task_id", "unknown")

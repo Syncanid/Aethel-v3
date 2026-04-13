@@ -10,6 +10,7 @@ from dateutil import parser
 from core.io.event_bus import EventBus
 from core.io.event_schema import OneBotEvent, EventType, EventSource, Action, ActionStatus
 from core.kernel.agent import AutonomousAgent
+from core.limbic.manager import LimbicManager
 from core.tool_manager.registry import register
 
 logger = logging.getLogger(__name__)
@@ -254,6 +255,41 @@ async def wait_forever(
         ))
 
     return None
+
+
+@register()
+async def suppress_urge(
+        reason: str,
+        duration_minutes: int,
+        limbic: LimbicManager = None,
+        event_bus: EventBus = None
+) -> str:
+    """
+    当你内心产生了强烈的潜意识冲动（如社交渴望、极度好奇），但你评估当前的物理现实绝对不允许你发声，决定强行忍耐时调用此工具。
+    高危警告：调用此工具不会让需求消失，而是会严重消耗你的认知能量（引发精神内耗），并可能在未来导致情绪反弹或失控。
+
+    :param reason: 你决定压抑冲动的具体心理活动和客观原因。
+    :param duration_minutes: 你打算强行让自己冷静和自闭的时间（分钟）。
+    """
+    if not limbic:
+        return "工具执行失败：无法连接到底层边缘系统。"
+
+    # 1. 触发边缘系统物理内耗 (调用我们在第一步写的接口)
+    await limbic.suppress_drive(drive_type="social", fatigue_increase=0.3)
+
+    # 2. 向系统控制台广播心流日志，增强观测性
+    if event_bus:
+        event_bus.publish_action(Action(
+            action="broadcast_log",
+            params={
+                "content": f"🛡️ [心理压抑] 强行忍耐 {duration_minutes} 分钟。原因: {reason}"}
+        ))
+
+    # 3. 执行时间层面的物理挂起
+    sleep_seconds = duration_minutes * 60
+    await asyncio.sleep(sleep_seconds)
+
+    return f"已完成 {duration_minutes} 分钟的自我压制。当前状态：冲动未完全消退，且感到明显的精神疲惫和一定的焦躁感。"
 
 
 @register()

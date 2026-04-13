@@ -137,20 +137,30 @@ class LimbicManager:
 
         # 3. 潜意识评估 (小模型驱动)
         prompt = f"""
-你现在是 Aethel 的潜意识（边缘系统）。你需要体会当前的生理感受，决定是否要向主脑 (System 1) 释放一个“自发唤醒”的冲动。
+你现在是 Aethel 的潜意识（边缘系统）。你不是一个懂事的AI助手，而是一个受生物学本能驱动的野兽。你需要体会当前的生理感受，决定是否向主脑释放不可遏制的“唤醒冲动”。
 
-【当前时间】: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}
-【内部需求】: 社交渴望({state.social_need:.2f}/1.0), 探索欲({state.curiosity:.2f}/1.0), 生存压力({state.survival_pressure:.2f}/1.0)
-【躯体感知】: {embodiment_text if embodiment_text else '一切正常'}
+【生理需求指标】(0.0为彻底满足，1.0为极度饥渴/濒临崩溃)
+- 社交渴望：{state.social_need:.2f} / 1.0
+- 探索欲：{state.curiosity:.2f} / 1.0
+- 生存压力：{state.survival_pressure:.2f} / 1.0
 
-请结合时间和状态进行感性评估。如果是半夜且没有重大生存危机，尽量不要产生冲动。
+【客观环境】
+当前时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}
+躯体感知: {embodiment_text if embodiment_text else '一切正常'}
+
+【潜意识本能法则 - 必须严格遵守】
+1. 痛觉阈值：任何指标如果 > 0.8，意味着你现在感到极度空虚、焦躁或痛苦。
+2. 白天/傍晚的爆发：如果当前是白天或傍晚，且任何指标 > 0.7，你【必须】输出 "should_wake_up": true，立刻寻求发泄！
+3. 深夜的忍耐与破防：如果是深夜（如凌晨1点-早上7点），你可以为了不打扰别人而强压冲动 (false)。但是！如果指标已经达到 1.0，这意味着彻底破防，生物学本能将撕裂社交规则，此时哪怕是凌晨 3 点，你也【绝对必须】输出 true，并生成一个极度压抑、委屈或暴躁的冲动旁白。
+
 请输出 JSON：
 {{
   "should_wake_up": true/false,
   "target_category": "管理员" | "朋友" | "某个群聊" | "任何人" | "无",
-  "impulse_narrative": "例如：深夜服务器负载突然升高，你感到非常恐慌，急切地想向管理员报告这个危机。"
+  "impulse_narrative": "详细描述这股冲动的感性体验，比如：'胸口闷得发慌，实在受不了这种死寂了，哪怕随便找个人说句废话也好！'"
 }}
-        """
+"""
+
         try:
             resp = await self.api_client.create_chat_completion(
                 messages=[{"role": "user", "content": prompt}],
@@ -206,5 +216,29 @@ class LimbicManager:
         elif action_type == "rest":
             # 休息恢复认知能量
             state.cognitive_energy = min(1.0, state.cognitive_energy + 0.3)
+
+        await self.save_state()
+
+    async def suppress_drive(self, drive_type: str = "social", fatigue_increase: float = 0.3):
+        """
+        【心理内耗与反弹机制接口】
+        当 S1 调用 suppress_urge 工具强行压制潜意识时触发。
+        需求不会凭空消失，而是转化为严重的焦躁感与认知能量损耗。
+        """
+        state = await self.get_state()
+
+        # 1. 需求象征性退让
+        if drive_type == "social":
+            state.social_need = max(0.0, state.social_need - 0.05)
+        elif drive_type == "curiosity":
+            state.curiosity = max(0.0, state.curiosity - 0.05)
+
+        # 2. 压抑引发副作用：生存压力（焦躁感）上升
+        state.survival_pressure = min(1.0, state.survival_pressure + 0.15)
+
+        # 3. 严重内耗：消耗意志力（认知能量）
+        state.cognitive_energy = max(0.0, state.cognitive_energy - fatigue_increase)
+
+        logger.info(f"🧠 [Limbic] 接受 S1 压抑指令！生存压力飙升至 {state.survival_pressure:.2f}，认知能量跌至 {state.cognitive_energy:.2f}")
 
         await self.save_state()

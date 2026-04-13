@@ -102,7 +102,7 @@ class AttentionFilter:
 
         # 0. 系统后台强中断 (绝对优先，解决拦截任务更新的痛点)
         if getattr(event, "type", "") in [EventType.TASK, "task"] or getattr(event, "detail_type", "") in [
-            DetailType.TASK_PROGRESS, DetailType.TASK_COMPLETE, "ask_system1_for_help", "task_update", "task_dispatch"
+            DetailType.TASK_COMPLETE, "ask_system1_for_help", "task_update", "task_dispatch"
         ]:
             logger.info("⚡ [Attention] 触发本能反射：接收到后台任务调度/更新。")
             return ReactionType.REPLY
