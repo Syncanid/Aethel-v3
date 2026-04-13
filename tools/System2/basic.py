@@ -316,20 +316,12 @@ async def groundbreaking_analysis(
             system_prompt=system_prompt,
             schema=analysis_schema
         )
-
-        content = result["content"]
-
         # 4. 解析结果
-        try:
-            analysis_data = json.loads(content)
+        analysis_data = result["content"]
 
-            # 记录分析结果
-            logger.info(f"分析完成: {analysis_data.get('diagnosis')}")
-            return analysis_data
-
-        except json.JSONDecodeError:
-            logger.error(f"尽管使用了 Schema，返回内容仍非有效 JSON: {content}")
-            return {"error": "解析分析结果失败", "raw": content}
+        # 记录分析结果
+        logger.info(f"分析完成: {analysis_data.get('diagnosis')}")
+        return analysis_data
 
     except Exception as e:
         logger.error(f"开创性分析失败: {e}", exc_info=True)

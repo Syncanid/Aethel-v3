@@ -2,6 +2,7 @@
 import argparse
 import asyncio
 import logging
+import platform
 import sys
 import threading
 from typing import List, Optional
@@ -206,7 +207,7 @@ if __name__ == "__main__":
 
     # Windows 兼容性
     if sys.platform == 'win32':
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
     # 1. 创建 System 实例
     system = AethelSystem()

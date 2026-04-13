@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import os
+import traceback
 import uuid
 from collections import deque
 from typing import Dict, Any, Optional
@@ -241,6 +242,8 @@ async def run_terminal_command(
             await proc.stdin.drain()
             logger.info(f"🐚 [System 2] 启动了本地持久化终端 (平台: {'Windows' if IS_WINDOWS else 'Unix'})")
         except Exception as e:
+            logger.debug(f"Current Loop Type: {type(asyncio.get_running_loop())}")
+            logger.error(f"子进程拉起失败详情: {traceback.format_exc()}")
             return f"【SYSTEM CRASH】无法拉起本地进程: {str(e)}"
 
     session = TERMINAL_SESSIONS[task_id]

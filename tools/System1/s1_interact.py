@@ -47,7 +47,7 @@ async def dispatch_background_task(
     event_bus.publish_event(event)
 
     # 告诉 System 1 任务已成功扔出去了
-    return f"任务已成功派发至后台 (任务ID: {task_id})。"
+    return f"任务已成功派发至后台。任务正在进行中，请耐心等待任务完成 (任务ID: {task_id})。"
 
 
 @register()

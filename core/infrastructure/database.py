@@ -70,16 +70,13 @@ SCHEMA_SQL = {
                           data_json
                           TEXT
                           NOT
-                          NULL,
-                          INDEX
-                          idx_task_time
-                      (
-                          task_id,
-                          timestamp
-                          DESC
-                      )
-                          );
+                          NULL
+                      );
                       """,
+    "s2_checkpoints_idx": """
+                          CREATE INDEX IF NOT EXISTS idx_task_time
+                              ON s2_checkpoints (task_id, timestamp DESC);
+                          """,
     "social_users": """
                     CREATE TABLE IF NOT EXISTS social_users
                     (

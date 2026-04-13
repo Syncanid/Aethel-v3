@@ -596,9 +596,12 @@ class TaskEngine:
                 except Exception:
                     pass
 
+            async with self.database.get_connection() as conn:
+                await conn.execute("DELETE FROM s2_checkpoints WHERE task_id = ?", (task_id,))
+                await conn.commit()
+
             self.tool_manager.unmount_skill_tools()
             self.is_busy = False
-            await self.save_checkpoint(is_stable=False)
             self._running_task_coro = None
 
     async def rollback_to_last_stable(self, new_reason: str) -> str:
@@ -670,11 +673,14 @@ class TaskEngine:
         """
         native_os = platform.system()
         native_node = platform.node()
+        current_work_dir = os.getcwd()
 
         # 默认基础信息
         context = [
             f"- 宿主系统: {native_os} ({os.name})",
-            f"- 宿主节点: {native_node}"
+            f"- 宿主节点: {native_node}",
+            f"- 宿主执行路径: `{current_work_dir}`",
+            f"- 当前终端工具运行模式:",
         ]
 
         # 检查是否有活跃的终端会话
@@ -682,7 +688,7 @@ class TaskEngine:
         session = TERMINAL_SESSIONS.get(task_id)
         if not session:
             shell_type = "PowerShell" if native_os == "Windows" else "Bash"
-            context.append(f"- 当前终端: 未初始化 (将默认使用 {shell_type})")
+            context.append(f"- 未初始化 (将默认使用 {shell_type})")
         else:
             s_type = session.get("type", "unknown")
             if s_type == "ssh":

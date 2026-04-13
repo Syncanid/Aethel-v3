@@ -153,9 +153,6 @@ async def send_message(
 
         logger.info(f"💤 消息发送完毕，已进入等待状态。")
 
-        return "已结束等待 | " + final_status
-
-    # 如果模型没有传入等待参数，正常返回发送成功的文本
     return final_status
 
 

@@ -100,11 +100,18 @@ class AttentionFilter:
     def _check_hard_rules(self, event: OneBotEvent) -> Optional[ReactionType]:
         """第一级漏斗：无条件触发的系统规则"""
 
+        logger.debug(f"Received event: {event}")
+
         # 0. 系统后台强中断 (绝对优先，解决拦截任务更新的痛点)
-        if getattr(event, "type", "") in [EventType.TASK, "task"] or getattr(event, "detail_type", "") in [
-            DetailType.TASK_COMPLETE, "ask_system1_for_help", "task_update", "task_dispatch"
-        ]:
-            logger.info("⚡ [Attention] 触发本能反射：接收到后台任务调度/更新。")
+        target_details = [
+            DetailType.TASK_COMPLETE,
+            "ask_system1_for_help",
+            "internal_frustration",
+            "wake_up",
+        ]
+        event_detail = getattr(event, "detail_type", "")
+        if event_detail in target_details:
+            logger.info(f"⚡ [Attention] 触发本能反射：{event_detail}。")
             return ReactionType.REPLY
 
         if getattr(event, "detail_type", "") == DetailType.INTERNAL_DRIVE:

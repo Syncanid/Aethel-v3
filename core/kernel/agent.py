@@ -253,7 +253,7 @@ class AutonomousAgent:
         logger.info(f"Event Ingested: {event.type}.{event.detail_type}")
 
         # 唤醒系统
-        if event.detail_type in [DetailType.INTERNAL_DRIVE, DetailType.TASK_PROGRESS, DetailType.TASK_COMPLETE]:
+        if event.detail_type in [DetailType.INTERNAL_DRIVE, DetailType.TASK_COMPLETE]:
             self.is_sleeping = False
             self.force_sleep = False
 

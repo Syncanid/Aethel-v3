@@ -251,11 +251,10 @@ class VectorStore:
         }
 
         try:
-            # 优先使用配置的 small_model (如果未配置则回退到主模型)，加快提取速度
             message = await self.api_client.create_chat_completion_once(
                 messages=f"提取实体：{query}",
                 system_prompt=system_prompt,
-                model=self.api_client.model,
+                model=self.api_client.small_model,
                 schema=schema
             )
             data = message.get("content", {})
