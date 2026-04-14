@@ -145,6 +145,7 @@ class OneBotV11Adapter(BaseAdapter):
         # 处理消息内容 (简单解析文本 + 保留原始结构)
         raw_message = data.get("message", "")
         alt_text = ""
+        image_list = []
 
         # 如果是 list 格式 (OneBot v11 Array)
         if isinstance(raw_message, list):
@@ -155,6 +156,10 @@ class OneBotV11Adapter(BaseAdapter):
                     alt_text += d.get("text", "")
                 elif t == "image":
                     alt_text += "[图片]"
+                    # 提取 URL 或本地文件路径
+                    img_url = d.get("url") or d.get("file")
+                    if img_url:
+                        image_list.append(img_url)
                 elif t == "face":
                     alt_text += "[表情]"
                 elif t == "at":
@@ -178,7 +183,8 @@ class OneBotV11Adapter(BaseAdapter):
             raw_data=data,
             extra={
                 "sender_info": data.get("sender", {}),
-                "msg_id": data.get("message_id")
+                "msg_id": data.get("message_id"),
+                "images": image_list
             }
         )
 

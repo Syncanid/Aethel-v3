@@ -94,8 +94,17 @@ class Hippocampus:
                 for msg in new_msgs:
                     # 生成唯一 ID
                     wal_id = str(id(msg))
-                    msg.setdefault("metadata", {})
-                    msg["metadata"]["_wal_id"] = wal_id  # 注入 ID 以便后续删除
+
+                    # 提取纯文本内容，将庞大的 Base64 彻底隔离在记忆系统之外
+                    pure_text = self._extract_text_for_memory(msg.get("content", ""))
+
+                    # 构建专供海马体消化的干净消息体 (切断与 Agent history 的引用污染)
+                    mem_msg = {
+                        "role": msg.get("role", "unknown"),
+                        "content": pure_text,
+                        "metadata": dict(msg.get("metadata", {})) # 浅拷贝元数据
+                    }
+                    mem_msg["metadata"]["_wal_id"] = wal_id
 
                     # WAL 落盘
                     # 必须在放入内存队列前完成，保证可靠性
@@ -104,15 +113,17 @@ class Hippocampus:
                             "INSERT OR IGNORE INTO wal_buffer (event_id, content, role, metadata_json, created_at) VALUES (?, ?, ?, ?, ?)",
                             (
                                 wal_id,
-                                msg.get("content", ""),
-                                msg.get("role", "unknown"),
-                                json.dumps(msg.get("metadata", {})),
+                                pure_text,
+                                mem_msg["role"],
+                                json.dumps(mem_msg["metadata"], ensure_ascii=False),
                                 time.time()
                             )
                         )
                         await conn.commit()
 
-                    await self.slow_lane_queue.put(msg)
+                    # 4. 推入造梦队列
+                    await self.slow_lane_queue.put(mem_msg)
+
             except Exception as e:
                 logger.error(f"Ingest loop error: {e}", exc_info=True)
 
@@ -234,6 +245,21 @@ class Hippocampus:
 
             # 采用弹性轮询，避免空耗 CPU，没必要像原代码一样每 30 秒查一次
             await asyncio.sleep(300)
+
+    def _extract_text_for_memory(self, content) -> str:
+        """从多模态负载中剥离视觉数据，仅保留纯文本供长期记忆消化"""
+        if isinstance(content, str):
+            return content
+        elif isinstance(content, list):
+            text_parts = []
+            for item in content:
+                if item.get("type") == "text":
+                    text_parts.append(item.get("text", ""))
+                elif item.get("type") == "image_url":
+                    # 替换为文本占位符，保持记忆的语境连贯性
+                    text_parts.append("[视觉输入]")
+            return "\n".join(text_parts)
+        return str(content)
 
     async def _compress_episodic_to_semantic(self):
         """执行记忆压缩算法"""

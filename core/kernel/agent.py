@@ -25,7 +25,7 @@ from core.memory.infinite_context import InfiniteContextManager
 from core.memory.vector_store import VectorStore
 from core.social.manager import UserManager
 from core.tool_manager.aggregator import ToolManager
-from core.utilities import calculate_tokens
+from core.utilities import calculate_tokens, encode_image_to_data_uri
 
 logger = logging.getLogger(__name__)
 
@@ -232,17 +232,42 @@ class AutonomousAgent:
             for field in ["id", "time", "raw_data", "message", "alt_message"]:
                 if field in event_data: del event_data[field]
 
-            content_msg = f"接收到用户消息：{json.dumps(event_data, ensure_ascii=False)} 内容：{event.alt_message}"
+            text_content = f"接收到用户消息：{json.dumps(event_data, ensure_ascii=False)} 内容：{event.alt_message}"
+            images = event.extra.get("images", [])
+
+            if images:
+                # 按照标准 Vision API 规范构建多模态 Content
+                content_payload = [{"type": "text", "text": text_content}]
+
+                for img_source in images:
+                    b64_data_uri = await encode_image_to_data_uri(img_source)
+
+                    if b64_data_uri:
+                        content_payload.append({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": b64_data_uri
+                            }
+                        })
+                    else:
+                        # 如果转码失败（如文件被删/网络超时），注入系统的容错提示，防止认知割裂
+                        content_payload.append({
+                            "type": "text",
+                            "text": "[系统警告：此位置的一张图片因获取失败已丢失，请告知用户图片加载失败。]"
+                        })
+            else:
+                # 兼容旧版纯文本
+                content_payload = text_content
+
             is_ephemeral = False
         else:
-            # 非对话事件，进行自然语言转译
-            content_msg = self._transcribe_event(event)
+            content_payload = self._transcribe_event(event)
             is_ephemeral = True
 
         # 3. 写入历史
         history_item = {
             "role": "user",
-            "content": str(content_msg),
+            "content": content_payload,
             "metadata": {
                 "type": event.type,
                 "ephemeral": is_ephemeral,
@@ -722,7 +747,10 @@ class AutonomousAgent:
             elif event.detail_type == "internal_frustration":
                 return f"【后台告警】S2 任务引擎传来挫败感信号：\"{event.message}\" 请根据此上下文调整行动或安抚用户。"
 
-            return f"【系统通知】检测到事件: {event.detail_type}"
+            elif event.detail_type == "wake_up":
+                return f"{event.message}"
+
+            return f"【系统通知】检测到事件: {event.detail_type}[{event.message}]"
 
         # 3. 处理请求 (Request)
         if event.type == EventType.REQUEST:
@@ -939,18 +967,24 @@ class AutonomousAgent:
                 },
                 "action": {
                     "type": "string",
-                    "enum": ["reply", "action", "tool", "ignore"],
-                    "description": "动作：reply(回复这条消息)、action(需要调用wait挂起等待、派发任务等)、tool(需要调用工具)、ignore(厌恶/不想理睬)"
+                    "enum": ["reply", "tool", "action", "ignore"],
+                    "description": (
+                        "动作决策：\n"
+                        "1. reply: 必须在调用 send_message 时选择。这代表你完成了本轮思考并向用户说话。\n"
+                        "2. tool: 仅在调用 memory_search, query_task_history 等不直接回话的工具时选择。\n"
+                        "3. action: 纯粹的系统内部调度（如 wait, dispatch_task），不开口且不调用常规工具。\n"
+                        "4. ignore: 厌恶、无视或在超时唤醒且无事可做时选择。"
+                    )
                 },
             },
             "required": ["inner_monologue", "tasks", "action"],
             "additionalProperties": False
         }
 
-        sanitized_history = [
-            {k: v for k, v in d.items() if k != 'metadata'}
-            for d in self.history
-        ]
+        sanitized_history = []
+        for d in self.history:
+            entry = {k: v for k, v in d.items() if k != 'metadata'}
+            sanitized_history.append(entry)
 
         return await self.api_client.create_chat_completion(
             messages=sanitized_history,

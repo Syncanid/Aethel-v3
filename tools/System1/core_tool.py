@@ -144,7 +144,7 @@ async def send_message(
             _dispatch_wake_up,
             'date',
             run_date=datetime.datetime.now() + datetime.timedelta(minutes=wait_minutes),
-            args=[event_bus, "等待超时"]
+            args=[event_bus, "你设定的等待时间已结束，期间未收到任何外部消息。"]
         )
 
         if agent:
@@ -202,7 +202,7 @@ async def wait(
             _dispatch_wake_up,
             'date',
             run_date=run_date,
-            args=[event_bus, "等待超时"]
+            args=[event_bus, "你设定的等待时间已结束，期间未收到任何外部消息。"]
         )
 
         # 将 Job ID 绑定到 Agent 实例，用于后续取消
