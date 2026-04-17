@@ -42,6 +42,9 @@ class DetailType(str, Enum):
     TASK_CANCEL = "task_cancel"  # S1 强制取消 S2 任务
     TASK_UPDATE = "task_update"  # S1 向 S2 发送实时补充信息
 
+    # 跨会话指令特权事件
+    CROSS_SESSION_DIRECTIVE = "cross_session_directive"
+
 
 class ActionStatus(str, Enum):
     OK = "ok"

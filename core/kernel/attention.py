@@ -21,10 +21,11 @@ INTEREST_STORE_KEY = "CURRENT_INTEREST_VECTOR"
 
 
 class ReactionType(str, Enum):
-    REPLY = "reply"  # 必须回复 (直接交互/强相关/系统任务)
-    INTERJECT = "interject"  # 主动插话 (弱交互/熟人特权/极度感兴趣)
-    OBSERVE = "observe"  # 静默观察 (无价值/插话阈值过高)
-    IGNORE = "ignore"  # 完全忽略 (黑名单/绝对不想理睬)
+    REPLY = "reply"  # 明确必须回复
+    INTERJECT = "interject"  # 主动插话
+    SILENT_OBSERVE = "silent_observe"  # 积极静默
+    OBSERVE = "observe"  # 普通观察
+    IGNORE = "ignore"  # 纯粹噪音
 
 
 class AttentionFilter:
@@ -60,9 +61,11 @@ class AttentionFilter:
         ctx_id = self._get_context_id(event)
         self.active_conversations[ctx_id] = time.time()
 
-    async def evaluate(self, event: OneBotEvent, recent_history: Optional[List[Dict]] = None) -> ReactionType:
+    async def evaluate(self, event: OneBotEvent,
+                       recent_history: Optional[List[Dict]] = None,
+                       willingness: float = 0.5) -> ReactionType:
         """
-        [主入口] 三级漏斗式注意力过滤网
+        注意力评估总线：结合硬规则、动态阈值与软规则(LLM)进行综合决策。
         """
         # ==========================================
         # 第一级漏斗：绝对本能反射 (Hard Rules)
@@ -89,8 +92,20 @@ class AttentionFilter:
         # ==========================================
         # 第三级漏斗：边缘系统驱动的动态评估 (LLM Soft Rules)
         # ==========================================
-        dynamic_threshold, state_desc = await self._calculate_dynamic_threshold(event)
-        soft_reaction = await self._check_soft_rules(event, dynamic_threshold, state_desc, recent_history)
+        threshold, state_desc = await self._calculate_dynamic_threshold(event, willingness)
+
+        # 如果模型极其厌倦该群聊 (willingness < 0.2)，且阻力值被拉爆
+        # 我们在这里直接进行物理拦截，绝不调用昂贵的 LLM
+        msg_text = getattr(event, "alt_message", "") or ""
+        is_mentioned = self.bot_self_id and f"[CQ:at,qq={self.bot_self_id}]" in msg_text
+        is_named = self.nickname and msg_text.strip().startswith(self.nickname)
+        is_private = getattr(event, "detail_type", "") in [DetailType.PRIVATE, "private"]
+
+        if threshold >= 0.85 and not (is_mentioned or is_named or is_private):
+            logger.info(f"🛑 [Attention Cutoff] 算力截断：当前意愿枯竭 ({willingness:.2f}) 且未被呼叫，拒绝投入算力，强制潜水。")
+            return ReactionType.IGNORE  # 直接抛弃，不进大脑
+
+        soft_reaction = await self._check_soft_rules(event, threshold, state_desc, recent_history)
 
         if soft_reaction in [ReactionType.REPLY, ReactionType.INTERJECT]:
             self._update_inertia(event)
@@ -98,42 +113,21 @@ class AttentionFilter:
         return soft_reaction
 
     def _check_hard_rules(self, event: OneBotEvent) -> Optional[ReactionType]:
-        """第一级漏斗：无条件触发的系统规则"""
+        """
+        第一级漏斗：无条件触发的系统规则
+        """
 
-        logger.debug(f"Received event: {event}")
+        logger.debug(f"Received event: {event.type}.{getattr(event, 'detail_type', 'unknown')}")
 
-        # 0. 系统后台强中断 (绝对优先，解决拦截任务更新的痛点)
+        # 0. 系统后台强中断 (仅保留系统级任务挂起或唤醒指令)
         target_details = [
             DetailType.TASK_COMPLETE,
             "ask_system1_for_help",
-            "internal_frustration",
             "wake_up",
         ]
         event_detail = getattr(event, "detail_type", "")
         if event_detail in target_details:
             logger.info(f"⚡ [Attention] 触发本能反射：{event_detail}。")
-            return ReactionType.REPLY
-
-        if getattr(event, "detail_type", "") == DetailType.INTERNAL_DRIVE:
-            logger.info("⚡ [Attention] 触发本能反射：生理驱动力告警。")
-            return ReactionType.REPLY
-
-        # 仅限文本消息的检查
-        if event.type != EventType.MESSAGE:
-            return None
-
-        msg_text = getattr(event, "alt_message", "") or ""
-
-        # 1. 明确提及 (@我)
-        if self.bot_self_id and f"[CQ:at,qq={self.bot_self_id}]" in msg_text:
-            return ReactionType.REPLY
-
-        # 2. 呼叫名字开头
-        if self.nickname and msg_text.strip().startswith(self.nickname):
-            return ReactionType.REPLY
-
-        # 3. 私聊强制接管 (私聊中没有插话概念，所有消息必须被看到)
-        if getattr(event, "detail_type", "") in [DetailType.PRIVATE, "private"]:
             return ReactionType.REPLY
 
         return None
@@ -168,10 +162,10 @@ class AttentionFilter:
 
         return None
 
-    async def _calculate_dynamic_threshold(self, event: OneBotEvent) -> Tuple[float, str]:
+    async def _calculate_dynamic_threshold(self, event: OneBotEvent, willingness: float) -> Tuple[float, str]:
         """
-        计算潜意识动态阈值，影响 LLM 的插话敏感度。
-        公式: Thr = Base - (Curiosity * 0.2) + (SurvivalPressure * 0.3) - (SocialNeed * 0.3) - (Inertia)
+        计算潜意识动态阈值与环境压迫力。
+        公式: Thr = Base - (Curiosity) + (Pressure) - (SocialNeed) - (Inertia) - (Environment_Modifier)
         """
         state = await self._get_neuro_state()
         threshold = self.BASE_THRESHOLD
@@ -204,66 +198,98 @@ class AttentionFilter:
             threshold -= mod
             factors.append(f"Inertia-{mod:.2f}")
 
-        threshold = max(0.1, min(0.95, threshold))
+        # --- 意愿极化引擎 (Willingness Engine) ---
+        # 意愿值越低，增加的阻力越大；意愿值越高，减少的阻力越大。
+        # 放大倍数设为 1.0：当 willingness 为 0 时，阻力暴增 0.5！
+        will_mod = (0.5 - willingness) * 1.0
+        threshold += will_mod
+        factors.append(f"Willingness{'+' if will_mod > 0 else ''}{will_mod:.2f}")
+
+        # --- 环境压迫力乘数 ---
+        msg_text = getattr(event, "alt_message", "") or ""
+        is_mentioned = self.bot_self_id and f"[CQ:at,qq={self.bot_self_id}]" in msg_text
+        is_named = self.nickname and msg_text.strip().startswith(self.nickname)
+        is_private = getattr(event, "detail_type", "") in [DetailType.PRIVATE, "private"]
+
+        if is_private:
+            mod = 0.50
+            threshold -= mod
+            factors.append(f"Private-{mod:.2f}")
+        elif is_mentioned or is_named:
+            mod = 0.40
+            threshold -= mod
+            factors.append(f"Mentioned-{mod:.2f}")
+
+        # 边界收束
+        threshold = max(0.05, min(0.95, threshold))
         return threshold, ",".join(factors)
 
     async def _check_soft_rules(self, event: OneBotEvent, threshold: float, state_desc: str,
                                 recent_history: Optional[List[Dict]] = None) -> ReactionType:
         """
-        第三级漏斗：LLM 动态评估。
-        此时已经排除了明确呼叫和系统事件，主要用于判断是否要在群聊中“主动插话”。
+        第三级漏斗：LLM 高维认知评估。
+        整合动态阈值与环境压迫力，决定最终的交互意愿。
         """
         content = getattr(event, "alt_message", "")
         sender = event.source.user_id
+        is_private = getattr(event, "detail_type", "") in [DetailType.PRIVATE, "private"]
+        is_mentioned = self.bot_self_id and f"[CQ:at,qq={self.bot_self_id}]" in content
 
         context_str = "无"
         if recent_history:
             lines = []
-            for msg in recent_history[-4:]:  # 只取最近 4 条，防止干扰
+            for msg in recent_history[-5:]:
                 role = msg.get("role", "unknown")
-                text = str(msg.get("content", "")).replace("\n", " ")[:100]
+                text = str(msg.get("content", "")).replace("\n", " ")[:150]
                 lines.append(f"[{role}]: {text}")
             context_str = "\n".join(lines)
 
+        mode_desc = f"当前插话/回复阻力值为: {threshold:.2f} (阈值越低越容易回复，生理与环境影响因子: [{state_desc}])。"
         if threshold > 0.7:
-            mode_desc = "高冷/自闭模式：你现在压力很大或很专心，除非话题极其重要或有强烈的情绪共鸣，否则保持沉默。"
-        elif threshold < 0.4:
-            mode_desc = "话痨/渴望模式：你现在精力旺盛或感到孤独，即使是普通的群聊也积极寻找话题切入点。"
-        else:
-            mode_desc = "标准模式：按正常逻辑判断是否接话。"
+            mode_desc += "【高冷/自闭状态】你现在压力极大或毫无交际欲望，除非极其重要，否则倾向于保持静默。"
+        elif threshold < 0.3:
+            mode_desc += "【高响应状态】由于对方是私聊/明确提及，或你处于孤独/好奇状态，你拥有极高的回复意愿。"
 
         prompt = f"""
-你是一个拟人化 AI 助手 ({self.nickname}) 的潜意识注意力门控。
-当前群聊中有人发了一条消息，你没有被提及。你需要决定是否要“主动插话”。
+你是一个拟人化 AI ({self.nickname}) 的潜意识门控。
+你需要基于生理阻力和上下文，决定对当前消息的潜意识反应。
 
-【当前生理状态】
-{mode_desc} (插话阻力值: {threshold:.2f}，越低越容易插话。生理影响因子: [{state_desc}])
-当前关注点: "{await self.get_current_interest_text()}"
+【生理与环境状态】
+{mode_desc}
+当前兴趣焦点: "{await self.get_current_interest_text()}"
 
 【近期上下文】
 {context_str}
 
-【当前消息】
+【当前刺激】
+场景: {"私聊" if is_private else "群聊"} (是否被明确@: {is_mentioned})
 {sender} 说: "{content}"
 
-【决策要求】
-分析该消息是否触及了你的“关注点”，或者是否有强烈的情绪需要你安抚。
-严格输出 JSON，不要任何多余内容：
+【决策规则】
+1. 评估你对该消息的“回复意愿置信度 (0.0~1.0)”。
+2. 如果对方的话题与你的【兴趣焦点】高度重合或具有极强吸引力，你可以【无视】当前的阻力值({threshold:.2f})，直接给出超过阻力的置信度并决定 REPLY/INTERJECT。这叫“见猎心喜”。
+3. 否则，严格按阻力行事：
+    - 置信度 >= {threshold:.2f}：决定回复 (REPLY) 或插话 (INTERJECT)。
+    - 置信度 < {threshold:.2f}：
+        - 若消息是对你明确发出的(私聊/@)，选择【积极静默 (SILENT_OBSERVE)】。
+        - 若是群闲聊，选择【观察 (OBSERVE)】。
+
+输出 JSON：
 {{
-    "decision": "INTERJECT" | "OBSERVE",
-    "reason": "为什么插话或为什么无视（少于15字）",
-    "confidence": 0.0 到 1.0 之间的浮点数 (插话意愿有多强)
+    "decision": "REPLY" | "INTERJECT" | "SILENT_OBSERVE" | "OBSERVE" | "IGNORE",
+    "reason": "简短的心理动机",
+    "confidence": 0.0 到 1.0
 }}
 """
         try:
             response = await self.api_client.create_chat_completion_once(
                 messages=prompt,
-                system_prompt="你是一个冷酷高效的决策引擎。",
+                system_prompt="你是一个冷酷高效的注意力过滤引擎。",
                 model=self.api_client.small_model,
                 schema={
                     "type": "object",
                     "properties": {
-                        "decision": {"type": "string", "enum": ["INTERJECT", "OBSERVE"]},
+                        "decision": {"type": "string", "enum": ["REPLY", "INTERJECT", "SILENT_OBSERVE", "OBSERVE", "IGNORE"]},
                         "reason": {"type": "string"},
                         "confidence": {"type": "number"}
                     },
@@ -273,21 +299,27 @@ class AttentionFilter:
             )
             result = response.get("content", {})
             if isinstance(result, str):
-                return ReactionType.OBSERVE
-            decision = result.get("decision", "OBSERVE")
-            confidence = result.get("confidence", 0.0)
-
-            if decision == "INTERJECT":
-                # 与动态生理阈值对抗
-                if confidence >= threshold:
-                    logger.info(
-                        f"🗣️ [Attention] 决定插话: 置信度 {confidence:.2f} >= 阻力 {threshold:.2f} ({result.get('reason')})")
-                    return ReactionType.INTERJECT
-                else:
-                    logger.info(f"🛑 [Attention] 放弃插话: 意愿 {confidence:.2f} 不足以克服当前阻力 {threshold:.2f}")
+                # 防范模型未按 Schema 输出的降级容错
+                import json
+                try:
+                    result = json.loads(result)
+                except:
                     return ReactionType.OBSERVE
 
-            return ReactionType.OBSERVE
+            decision = result.get("decision", "OBSERVE")
+            confidence = float(result.get("confidence", 0.0))
+            reason = result.get("reason", "无明确原因")
+
+            logger.info(f"🧠 [Attention Eval] 意愿: {confidence:.2f} | 阻力: {threshold:.2f} | 决策: {decision} ({reason})")
+
+            # 强逻辑收束：防止模型出现置信度低于阈值却强行 REPLY 的幻觉
+            if decision in ["REPLY", "INTERJECT"] and confidence < threshold:
+                logger.warning(f"⚠️ [Attention] 模型决策倒挂，意愿({confidence})不足以击穿阻力({threshold})。强制降级为 SILENT_OBSERVE 或 OBSERVE。")
+                if is_private or is_mentioned:
+                    return ReactionType.SILENT_OBSERVE
+                return ReactionType.OBSERVE
+
+            return ReactionType(decision.lower())
 
         except Exception as e:
             logger.error(f"Attention LLM check failed: {e}")

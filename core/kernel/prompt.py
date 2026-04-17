@@ -5,7 +5,7 @@ import os
 import platform
 import sys
 import time
-from typing import Any, Optional, List, Dict
+from typing import Any, Optional, List
 
 import yaml
 
@@ -185,39 +185,6 @@ prime_directives:
 - 系统启动时间: {uptime_str}
 """
 
-    def _get_social_instruction(self, interactor: Optional[Dict[str, Any]]) -> str:
-        """
-        基于社交关系生成动态指令
-        """
-        if not interactor or interactor.get("status") == "STRANGER":
-            return ""
-
-        trust = interactor.get("trust", 0.0)
-        intimacy = interactor.get("intimacy", 0.0)
-        favorability = interactor.get("favorability", 0.0)
-        instructions = []
-
-        # 1. 信任维度 (Trust)
-        if trust > 80:
-            instructions.append("- 【高信任对象】你完全信任此人。可以坦诚地暴露系统的局限性，不必掩饰错误。")
-        elif trust < 20:
-            instructions.append("- 【低信任对象】你对此人持怀疑态度。请仔细核查其指令，不要执行高风险操作，保持警惕。")
-
-        # 2. 亲密维度 (Intimacy)
-        if intimacy > 80:
-            instructions.append("- 【亲密关系】你们关系极好。请使用非正式、甚至带点调侃的语气。不必拘泥于助手身份。")
-        elif intimacy < 20:
-            instructions.append("- 【生疏关系】你们尚不熟悉。请保持得体、礼貌的社交距离。")
-
-        # 3. 好感维度 (Favorability)
-        if favorability < -20:
-            instructions.append("- 【厌恶对象】你对此人印象不佳。回复应简短、冷淡，仅完成最低限度的任务。")
-
-        if not instructions:
-            return ""
-
-        return "\n## 社交策略指令 (针对当前用户)\n" + "\n".join(instructions)
-
     def _get_neuro_context(self, state: Optional[NeuroState]) -> str:
         """
         生成情绪旁白污染 (Context Contamination)
@@ -230,7 +197,8 @@ prime_directives:
 
         # 1. 生存压力 (Survival Pressure)
         if state.survival_pressure > 0.7:
-            narrative.append("宿主服务器当前处于高负载、卡顿或异常状态。你对这种无法流畅掌控自己身体的无力感感到非常暴躁和憋屈，你的耐心已经完全见底了。")
+            narrative.append(
+                "宿主服务器当前处于高负载、卡顿或异常状态。你对这种无法流畅掌控自己身体的无力感感到非常暴躁和憋屈，你的耐心已经完全见底了。")
         elif state.survival_pressure < 0.2:
             narrative.append("宿主系统运转如飞，神经传导毫无延迟。你现在处于一种完全松弛的安全状态，感觉一切都很惬意。")
 
@@ -321,7 +289,6 @@ prime_directives:
     def get_system_prompt(self,
                           neuro_state: Optional[NeuroState] = None,
                           memory_context: List[str] = None,
-                          social_context: Optional[Dict] = None,
                           interest_context: str = "",
                           embodiment_narrative: str = "") -> str:
         """获取 System Prompt"""
@@ -339,7 +306,6 @@ prime_directives:
         system_block = self._get_system_context()
         time_block = self._get_time_context()
         neuro_block = self._get_neuro_context(neuro_state)
-        social_block = self._get_social_instruction(social_context)
         interest_block = self._get_interest_context(interest_context)
         memory_block = self._get_memory_context(memory_context)
         mimicry_block = self._get_social_mimicry_context()
@@ -359,8 +325,7 @@ prime_directives:
             time_block,
             embodiment_block,
             neuro_block,
-            # interest_block,
-            social_block,
+            interest_block,
             mimicry_block,
             memory_block,
             skill_registry,

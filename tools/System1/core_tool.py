@@ -8,7 +8,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dateutil import parser
 
 from core.io.event_bus import EventBus
-from core.io.event_schema import OneBotEvent, EventType, EventSource, Action, ActionStatus
+from core.io.event_schema import Action, ActionStatus
 from core.kernel.agent import AutonomousAgent
 from core.limbic.manager import LimbicManager
 from core.tool_manager.registry import register
@@ -251,6 +251,64 @@ async def wait_forever(
         ))
 
     return None
+
+
+import time
+from core.io.event_schema import OneBotEvent, EventType, DetailType, EventSource
+from core.io.event_bus import EventBus
+
+
+# 确保你的文件中已经导入了 @register
+
+@register()
+async def cross_session_dispatch(
+        target_session_id: str,
+        directive_reason: str,
+        carried_context: str,
+        target_puid: str = "",
+        event_bus: EventBus = None
+) -> str:
+    """
+    跨越当前物理空间，前往另一个群聊或私聊去寻找特定人员，并传达信息或交接任务。
+    使用此工具后，你的主意识会立刻被传送到目标房间，并使用目标房间的身份面具与对方说话。
+
+    :param target_session_id: 必须精准提供目标空间的 ID (格式如 group_12345, private_67890)。
+    :param directive_reason: 你跨区找他的核心目的与原因 (例如：'转达刚才群里的报错信息')。
+    :param carried_context: 你需要携带的情报、上下文或跨区流转的任务数据 (请尽可能详细)。
+    :param target_puid: 你要找的具体目标人员的 PUID。如果是向全群广播，可留空。
+    """
+    # 构造一个虚假的源 (Source)，伪装成系统底层发出的最高优指令
+    pseudo_source = EventSource(
+        platform="system",
+        user_id="internal_daemon",
+        group_id=""
+    )
+
+    # 构造特权跨会话事件
+    dispatch_event = OneBotEvent(
+        id=f"dispatch_{int(time.time() * 1000)}",
+        time=time.time(),
+        type=EventType.NOTICE,
+        detail_type=DetailType.CROSS_SESSION_DIRECTIVE,
+        sub_type="projection",
+        source=pseudo_source,
+        message="[跨会话意识投射]",
+        alt_message="[跨会话意识投射]",
+        extra={
+            "target_session_id": target_session_id,
+            "target_puid": target_puid,
+            "directive_reason": directive_reason,
+            "carried_context": carried_context
+        }
+    )
+
+    # 异步推入事件总线
+    if event_bus:
+        event_bus.publish_event(dispatch_event)
+    else:
+        return "严重错误：事件总线 (EventBus) 未成功注入，意识投射失败。"
+
+    return f"意识投射程序已启动。你的意识正在被传输至 [{target_session_id}]..."
 
 
 @register()

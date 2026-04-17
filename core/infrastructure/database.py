@@ -96,6 +96,29 @@ SCHEMA_SQL = {
                         REAL
                     )
                     """,
+    "social_groups": """
+                     CREATE TABLE IF NOT EXISTS social_groups
+                     (
+                         group_id
+                         TEXT
+                         PRIMARY
+                         KEY,
+                         platform
+                         TEXT,
+                         name
+                         TEXT,
+                         familiarity
+                         REAL
+                         DEFAULT
+                         0.0,
+                         vibe
+                         TEXT,
+                         data_json
+                         TEXT,
+                         last_seen
+                         REAL
+                     )
+                     """,
     "wal_buffer": """
                   CREATE TABLE IF NOT EXISTS wal_buffer
                   (

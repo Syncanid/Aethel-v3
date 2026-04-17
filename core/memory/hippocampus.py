@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 class Hippocampus:
     def __init__(self, config: Config, limbic: LimbicManager, api_client: GenericAPIClient, database: Database,
-                 agent_history: List[Dict]):
+                 agent_history: Dict):
         """
         :param agent_history: 对 AutonomousAgent.history 的直接引用
         """
@@ -409,30 +409,33 @@ class Hippocampus:
             logger.error(f"图谱修剪失败: {e}", exc_info=True)
 
     def _scan_delta(self) -> List[Dict]:
-        """扫描增量消息 (仅在内存中操作，极快)"""
+        """扫描增量消息"""
         new_msgs = []
-
-        # 1. 扫描增量消息
-        # 注意：history 是动态变化的（被修剪），但对象 ID 在内存中是唯一的
-        # 我们遍历当前的 history，找出未见过的对象
         current_history_ids = set()
 
-        # 遍历当前历史快照
-        for msg in list(self.history_ref):
-            msg_id = id(msg)
-            current_history_ids.add(msg_id)
+        # 遍历所有活跃的 Session 字典
+        for session_id, session_history in self.history_ref.items():
+            # 遍历每个 Session 的时间线
+            for msg in list(session_history):
+                msg_id = id(msg)
+                current_history_ids.add(msg_id)
 
-            if msg_id not in self.processed_ids:
-                # 过滤逻辑
-                metadata = msg.get("metadata", {})
-                if metadata.get("ephemeral", False):
-                    self.processed_ids.add(msg_id)
-                    continue
+                if msg_id not in self.processed_ids:
+                    metadata = msg.get("metadata", {})
+                    if metadata.get("ephemeral", False):
+                        self.processed_ids.add(msg_id)
+                        continue
 
-                if msg.get("role") in ["user", "assistant"]:
-                    new_msgs.append(msg)
-                    self.processed_ids.add(msg_id)
-                    self.last_active_time = time.time()
+                    if msg.get("role") in ["user", "assistant"]:
+                        # 将 session_id 注入增量，方便未来构建图谱时定位
+                        msg_copy = msg.copy()
+                        if "metadata" not in msg_copy:
+                            msg_copy["metadata"] = {}
+                        msg_copy["metadata"]["_source_session"] = session_id
+
+                        new_msgs.append(msg_copy)
+                        self.processed_ids.add(msg_id)
+                        self.last_active_time = time.time()
 
         # 清理已不存在的消息ID (防止内存泄漏)
         self.processed_ids.intersection_update(current_history_ids)
