@@ -160,14 +160,14 @@ class AutonomousAgent:
                     "relationship_tags": user_profile.relationship_tags,
                     "favorability": user_profile.favorability,
                     "trust": user_profile.trust,
-                    "intimacy": user_profile.intimacy,  # 新增
+                    "intimacy": user_profile.intimacy,
                     "impression": user_profile.impression
                 })
             else:
                 # [陌生人]
                 interactor_info.update({
                     "status": "STRANGER",
-                    "note": "User not in database. Use tool `social_record_user` to remember them."
+                    "note": "用户不在数据库中，请立刻使用`social_record_user`记录。"
                 })
 
             # 更新 Scratchpad

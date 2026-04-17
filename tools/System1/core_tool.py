@@ -223,7 +223,6 @@ async def wait_forever(
 ) -> Optional[str]:
     """
     [Control] 进入无限期休眠状态，直到收到外部事件唤醒。
-    优先使用wait工具，尽量不使用wait_forever工具。
 
     Args:
         reason: 启动休眠的原因。
