@@ -7,6 +7,7 @@ from typing import Optional
 from core.infrastructure.api_client import GenericAPIClient
 from core.io.event_bus import EventBus
 from core.io.event_schema import OneBotEvent, EventType, DetailType, TaskPayload, EventSource
+from core.kernel.task_registry import global_task_registry
 from core.tool_manager.registry import register
 
 
@@ -15,6 +16,7 @@ async def dispatch_background_task(
         task_description: str,
         parameters: Optional[dict] = None,
         event_bus: EventBus = None,
+        agent_state: Optional[dict] = None
 ) -> str:
     """
     当用户要求执行复杂任务（如：搜索网络、分析文件、写代码、查系统状态、多步推理等）时，调用此工具将任务派发给后台 System 2 处理。
@@ -23,9 +25,15 @@ async def dispatch_background_task(
     """
     if parameters is None:
         parameters = {}
+
+    # 物理截获：无感锚定源发会话坐标
+    origin_session = agent_state.get("current_session_id") if agent_state else None
+    if origin_session:
+        parameters["origin_session"] = origin_session
+
     task_id = f"task_{int(time.time())}"
 
-    # 构造 TaskPayload (复用我们阶段 1 写的结构)
+    # 构造 TaskPayload
     payload = TaskPayload(
         task_id=task_id,
         description=task_description,

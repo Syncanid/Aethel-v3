@@ -181,9 +181,11 @@ class AethelSystem:
         logger.info("系统已完全关闭。再见。")
 
 
-def start_backend_thread(loop, system):
+def start_backend_thread(system):
     """在子线程中运行 asyncio 事件循环"""
+    loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+
     try:
         loop.run_until_complete(system.bootstrap())
         loop.run_until_complete(system.start())
@@ -195,9 +197,10 @@ def start_backend_thread(loop, system):
         # 确保 shutdown 被调用
         try:
             loop.run_until_complete(system.shutdown())
-        except:
-            pass
-        loop.close()
+        except Exception as e:
+            logger.error(f"关闭清理过程异常: {e}", exc_info=True)
+        finally:
+            loop.close()
 
 
 if __name__ == "__main__":
@@ -227,6 +230,8 @@ if __name__ == "__main__":
             loop.run_until_complete(system.start())
         except KeyboardInterrupt:
             logger.info("接收到键盘中断信号 (Ctrl+C)，准备退出...")
+            if system.shutdown_event:
+                system.shutdown_event.set()
         except Exception as e:
             logger.critical(f"系统运行异常: {e}", exc_info=True)
         finally:
@@ -248,16 +253,13 @@ if __name__ == "__main__":
             print("提示: 请安装 PyQt6 或使用 'python main.py --nogui' 启动无头模式。")
             sys.exit(1)
 
-        # 2. 创建新的事件循环
-        new_loop = asyncio.new_event_loop()
-
-        # 3. 在子线程启动后端
-        t = threading.Thread(target=start_backend_thread, args=(new_loop, system), daemon=True)
+        # 2. 在子线程启动后端 (不再传递外部创建的 loop)
+        t = threading.Thread(target=start_backend_thread, args=(system,), daemon=True)
         t.start()
 
         print(">>> 正在启动 GUI 监控终端 (关闭窗口以退出系统) <<<")
 
-        # 4. 在主线程运行 GUI (阻塞直到窗口关闭)
+        # 3. 在主线程运行 GUI (阻塞直到窗口关闭)
         try:
             exit_code = run_gui()
         except KeyboardInterrupt:
@@ -266,10 +268,10 @@ if __name__ == "__main__":
             print(f"GUI Error: {e}")
             exit_code = 1
 
-        # 5. 退出处理
+        # 4. 退出处理：物理切断并等待子线程安全回收
         print("正在停止后台服务...")
-        if new_loop.is_running():
-            asyncio.run_coroutine_threadsafe(system.shutdown(), new_loop)
+        if system.loop and system.loop.is_running() and system.shutdown_event:
+            system.loop.call_soon_threadsafe(system.shutdown_event.set)
 
-        t.join(timeout=3)
+        t.join(timeout=5.0)  # 给予后台足够的归档和断开时间
         sys.exit(exit_code)

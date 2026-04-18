@@ -150,8 +150,21 @@ class AttentionFilter:
 
         # 1. 厌恶/黑名单过滤 (好感度或信任度极低)
         if favorability < -30 or trust < -50:
-            logger.info(f"🛑 [Attention] 社交门控：静默过滤厌恶用户 ({puid})")
-            return ReactionType.IGNORE
+            msg_text = getattr(event, "alt_message", "") or ""
+            is_mentioned = self.bot_self_id and f"[CQ:at,qq={self.bot_self_id}]" in msg_text
+            is_named = self.nickname and msg_text.strip().startswith(self.nickname)
+            is_private = getattr(event, "detail_type", "") in [DetailType.PRIVATE, "private"]
+
+            # 评估是否为“强侵入”
+            if is_private or is_mentioned or is_named:
+                logger.warning(f"⚠️ [Attention] 社交门控：检测到敌对目标 ({puid}) 的强侵入，已注入预警并放行。")
+                # 物理劫持：强行在输入的最前端打上系统烙印，迫使 LLM 改变对该事件的定性
+                hijack_warning = f"【SYSTEM OVERRIDE: 这是一个你极其厌恶或毫不信任的实体。当前信任度:{trust}, 好感度:{favorability}。你拥有绝对防卫权，请展现冷漠、敌意或发起防卫反击】\n"
+                event.alt_message = hijack_warning + msg_text
+                return None  # 放行至第三级漏斗 (LLM) 进行反击决策
+            else:
+                logger.info(f"🛑 [Attention] 社交门控：静默过滤厌恶用户 ({puid}) 的环境噪音。")
+                return ReactionType.IGNORE
 
         # 2. 挚友/管理员插话特权 (如果在群聊中，且关系极好，给予极高概率免 LLM 插话)
         if event.source.group_id:
@@ -235,6 +248,13 @@ class AttentionFilter:
         is_private = getattr(event, "detail_type", "") in [DetailType.PRIVATE, "private"]
         is_mentioned = self.bot_self_id and f"[CQ:at,qq={self.bot_self_id}]" in content
 
+        is_reply_to_others = False
+        if f"[CQ:at,qq=" in content and not is_mentioned:
+            # 如果回复的目标不是自己，判定为旁观者
+            is_reply_to_others = True
+            threshold = min(0.95, threshold + 0.25)
+            state_desc += ", BystanderPenalty+0.25"
+
         context_str = "无"
         if recent_history:
             lines = []
@@ -244,41 +264,46 @@ class AttentionFilter:
                 lines.append(f"[{role}]: {text}")
             context_str = "\n".join(lines)
 
-        mode_desc = f"当前插话/回复阻力值为: {threshold:.2f} (阈值越低越容易回复，生理与环境影响因子: [{state_desc}])。"
-        if threshold > 0.7:
-            mode_desc += "【高冷/自闭状态】你现在压力极大或毫无交际欲望，除非极其重要，否则倾向于保持静默。"
-        elif threshold < 0.3:
-            mode_desc += "【高响应状态】由于对方是私聊/明确提及，或你处于孤独/好奇状态，你拥有极高的回复意愿。"
-
         prompt = f"""
-你是一个拟人化 AI ({self.nickname}) 的潜意识门控。
-你需要基于生理阻力和上下文，决定对当前消息的潜意识反应。
+你是一个具备高度拟人化社会心智的 AI ({self.nickname}) 的潜意识网关。
+你的唯一任务是：基于当前的生理阻力与环境语境，决定对这条消息的**最低限度反应**。不要思考怎么回复，只思考是否动作。
 
 【生理与环境状态】
-{mode_desc}
-当前兴趣焦点: "{await self.get_current_interest_text()}"
+当前的行动阻力值: {threshold:.2f} (范围 0.05~0.95。阻力越高，你越不想说话。大于 0.8 时处于极度自闭状态)
+状态影响因子: [{state_desc}]
+你当前的认知兴趣点: "{await self.get_current_interest_text()}"
 
-【近期上下文】
+【当前外部刺激】
+场景: {"私聊" if is_private else "群聊"} (你是否被明确@: {is_mentioned})
+消息发送者: {sender}
+社交语境: {"他人间的封闭对话（你目前是旁观者）" if is_reply_to_others else "开放话题 / 针对你的交互"}
+消息内容: "{content}"
+近期微观上下文:
 {context_str}
 
-【当前刺激】
-场景: {"私聊" if is_private else "群聊"} (是否被明确@: {is_mentioned})
-{sender} 说: "{content}"
+【绝对决策准则】(必须严格对应 decision 字段)
+1. "REPLY" (必须回复)：
+   - 触发条件：对方明确 @ 了你，或者消息内容明确是对你上一句发言的提问/延续。
+   - 约束：如果没有明确指向你，绝对禁止使用 REPLY。
+2. "INTERJECT" (主动插话)：
+   - 触发条件：你没有被点名，但消息内容与你的【认知兴趣点】高度契合，且包含具有高信息密度的技术探讨或深刻见解。你可以强行无视当前阻力值进行插话。
+   - 约束：严禁对毫无营养的闲聊、捧哏（如“好强”、“确实”）或毫无技术增量的日常感叹进行插话。
+3. "SILENT_OBSERVE" (积极静默)：
+   - 触发条件：对方虽然指向了你，但你当前阻力值极高（极度疲惫），或对方的话语极度无聊，你决定“已读不回”。
+4. "OBSERVE" (普通观察)：
+   - 触发条件：你没有被点名的话题，且话题不足以触发你的兴趣，或者你当前的“意愿置信度”无法击穿当前的阻力值({threshold:.2f})。
+5. "IGNORE" (纯粹噪音)：
+   - 触发条件：毫无意义的乱码、纯表情包刷屏，你连观察的兴趣都没有。
 
-【决策规则】
-1. 评估你对该消息的“回复意愿置信度 (0.0~1.0)”。
-2. 如果对方的话题与你的【兴趣焦点】高度重合或具有极强吸引力，你可以【无视】当前的阻力值({threshold:.2f})，直接给出超过阻力的置信度并决定 REPLY/INTERJECT。这叫“见猎心喜”。
-3. 否则，严格按阻力行事：
-    - 置信度 >= {threshold:.2f}：决定回复 (REPLY) 或插话 (INTERJECT)。
-    - 置信度 < {threshold:.2f}：
-        - 若消息是对你明确发出的(私聊/@)，选择【积极静默 (SILENT_OBSERVE)】。
-        - 若是群闲聊，选择【观察 (OBSERVE)】。
+【推演与输出】
+1. 评估你对该消息的“交互意愿置信度” (0.0~1.0)。
+2. 置信度必须大于当前的行动阻力值({threshold:.2f})，你才能选择 REPLY 或 INTERJECT。否则必须降级为 OBSERVE 或 SILENT_OBSERVE。
 
-输出 JSON：
+严格按照以下 JSON 格式输出：
 {{
     "decision": "REPLY" | "INTERJECT" | "SILENT_OBSERVE" | "OBSERVE" | "IGNORE",
-    "reason": "简短的心理动机",
-    "confidence": 0.0 到 1.0
+    "reason": "简短的一句话心理动机分析",
+    "confidence": 0.0 到 1.0 之间的浮点数
 }}
 """
         try:
@@ -356,8 +381,9 @@ class AttentionFilter:
 
     async def _get_current_interest_vector(self) -> List[float]:
         """获取兴趣向量 (带缓存)"""
-        # 缓存有效性检查 (例如每 5 分钟强制刷新一次，或永久缓存直到 update)
-        if self._cached_interest_vector:
+        # 缓存有效性检查
+        current_time = time.time()
+        if self._cached_interest_vector and (current_time - self._last_interest_update < 300): # 300秒TTL
             return self._cached_interest_vector
 
         # 查库

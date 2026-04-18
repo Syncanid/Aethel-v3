@@ -10,6 +10,7 @@ from dateutil import parser
 from core.io.event_bus import EventBus
 from core.io.event_schema import Action, ActionStatus
 from core.kernel.agent import AutonomousAgent
+from core.kernel.task_registry import global_task_registry
 from core.limbic.manager import LimbicManager
 from core.tool_manager.registry import register
 
@@ -266,6 +267,8 @@ async def cross_session_dispatch(
         directive_reason: str,
         carried_context: str,
         target_puid: str = "",
+        s2_task_id: str = "",
+        variables: dict = None,
         event_bus: EventBus = None
 ) -> str:
     """
@@ -274,17 +277,34 @@ async def cross_session_dispatch(
 
     :param target_session_id: 必须精准提供目标空间的 ID (格式如 group_12345, private_67890)。
     :param directive_reason: 你跨区找他的核心目的与原因 (例如：'转达刚才群里的报错信息')。
-    :param carried_context: 你需要携带的情报、上下文或跨区流转的任务数据 (请尽可能详细)。
+    :param carried_context: 你需要携带的情报、上下文 (请尽可能详细)。
     :param target_puid: 你要找的具体目标人员的 PUID。如果是向全群广播，可留空。
+    :param s2_task_id: (可选) 如果你跨域是为了移交或共享某个后台 System 2 任务，请填写该任务 ID。目标房间将自动订阅该任务的后续进度。
+    :param variables: (可选) 跨会话需要传递的具体结构化变量/最终计算结果。
     """
-    # 构造一个虚假的源 (Source)，伪装成系统底层发出的最高优指令
+    if variables is None:
+        variables = {}
+
+    # 1. 如果携带了 S2 任务，在投射前物理挂载目标房间
+    system_log = ""
+    if s2_task_id:
+        active_tasks = await global_task_registry.get_active_tasks()
+        if any(t.task_id == s2_task_id for t in active_tasks):
+            await global_task_registry.subscribe_session(s2_task_id, target_session_id)
+            system_log = f"\n[系统底层同步] 已将目标房间 {target_session_id} 成功桥接至任务 {s2_task_id} 的多路广播网络。"
+        else:
+            system_log = f"\n[系统底层警告] 尝试桥接任务 {s2_task_id} 失败，该任务可能已终结或 ID 错误。"
+
+        carried_context += system_log
+
+    # 2. 构造一个虚假的源 (Source)，伪装成系统底层发出的最高优指令
     pseudo_source = EventSource(
         platform="system",
         user_id="internal_daemon",
         group_id=""
     )
 
-    # 构造特权跨会话事件
+    # 3. 构造特权跨会话事件，将状态与变量打包入 extra
     dispatch_event = OneBotEvent(
         id=f"dispatch_{int(time.time() * 1000)}",
         time=time.time(),
@@ -298,17 +318,19 @@ async def cross_session_dispatch(
             "target_session_id": target_session_id,
             "target_puid": target_puid,
             "directive_reason": directive_reason,
-            "carried_context": carried_context
+            "carried_context": carried_context,
+            "s2_task_id": s2_task_id,
+            "variables": variables
         }
     )
 
-    # 异步推入事件总线
+    # 4. 异步推入事件总线
     if event_bus:
         event_bus.publish_event(dispatch_event)
     else:
         return "严重错误：事件总线 (EventBus) 未成功注入，意识投射失败。"
 
-    return f"意识投射程序已启动。你的意识正在被传输至 [{target_session_id}]..."
+    return f"意识投射程序已启动。你的意识正在被传输至 [{target_session_id}]...{system_log}"
 
 
 @register()

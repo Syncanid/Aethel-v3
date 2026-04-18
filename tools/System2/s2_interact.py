@@ -5,9 +5,19 @@ from typing import Optional
 from core.io.event_bus import EventBus
 from core.io.event_schema import OneBotEvent, EventType, DetailType, TaskPayload, EventSource
 from core.kernel.task_engine import TaskEngine
+from core.kernel.task_registry import global_task_registry
 from core.tool_manager.registry import register
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_session_to_source(session_id: str) -> EventSource:
+    """反向解析引擎"""
+    if session_id.startswith("group_"):
+        return EventSource(platform="internal", group_id=session_id.split("_")[1])
+    elif session_id.startswith("private_"):
+        return EventSource(platform="internal", user_id=session_id.split("_")[1])
+    return EventSource(platform="internal")
 
 
 @register()
@@ -22,32 +32,29 @@ async def report_task_progress(
     :param progress_message: 要汇报的具体进度内容。
     """
     task_id = agent_state.get("current_task_id", "unknown")
+    payload = TaskPayload(task_id=task_id, progress_msg=progress_message)
 
-    # 构造 TaskPayload
-    payload = TaskPayload(
-        task_id=task_id,
-        progress_msg=progress_message
-    )
+    # 提取订阅者矩阵
+    subscribers = await global_task_registry.get_subscribers(task_id)
+    if not subscribers:
+        subscribers = ["internal_default"]
 
-    source = EventSource(
-        platform="internal",
-    )
-
-    # 发送 TASK_PROGRESS 事件，标记 requires_user_input 为 False
-    event = OneBotEvent(
-        type=EventType.TASK,
-        detail_type=DetailType.TASK_PROGRESS,
-        source=source,
-        extra={
-            "task_payload": payload.model_dump(),
-            "requires_user_input": False  # 仅作阶段性汇报，不需要用户回复
-        }
-    )
-
-    event_bus.publish_event(event)
+    # 遍历拓扑散射
+    for session_id in subscribers:
+        source = _resolve_session_to_source(session_id)
+        event = OneBotEvent(
+            type=EventType.TASK,
+            detail_type=DetailType.TASK_PROGRESS,
+            source=source,
+            extra={
+                "task_payload": payload.model_dump(),
+                "requires_user_input": False
+            }
+        )
+        event_bus.publish_event(event)
 
     # 返回给 S2 LLM 的执行结果
-    return "进度已成功汇报给 System 1。"
+    return "进度已成功汇报。"
 
 
 @register()
@@ -87,25 +94,24 @@ async def ask_system1_for_help(
         description=question  # 将问题内容放在这里
     )
 
-    source = EventSource(
-        platform="internal",
-    )
+    subscribers = await global_task_registry.get_subscribers(task_id)
+    if not subscribers:
+        subscribers = ["internal_default"]
 
-    # 发送一个特殊的 TASK_PROGRESS 事件，带有 requires_user_input 标记
-    event = OneBotEvent(
-        type=EventType.TASK,
-        detail_type=DetailType.TASK_PROGRESS,
-        source=source,
-        extra={
-            "task_payload": payload.model_dump(),
-            "requires_user_input": True
-        }
-    )
+    for session_id in subscribers:
+        source = _resolve_session_to_source(session_id)
+        event = OneBotEvent(
+            type=EventType.TASK,
+            detail_type=DetailType.TASK_PROGRESS,
+            source=source,
+            extra={
+                "task_payload": payload.model_dump(),
+                "requires_user_input": True  # 触发中断
+            }
+        )
+        event_bus.publish_event(event)
 
-    event_bus.publish_event(event)
-
-    # 返回给 S2 LLM 的观测结果，引导它挂起
-    return "已将问题发送给 System 1，请调用 `wait` 工具挂起自己，等待 System 1 通过 TASK_UPDATE 将用户的答案传回给你。"
+    return f"强制中断请求已分发至 {len(subscribers)} 个监控通道。请调用 `wait` 工具将当前线程挂起，监听回传信号。"
 
 
 @register()

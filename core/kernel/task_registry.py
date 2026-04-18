@@ -21,6 +21,7 @@ class TaskRecord(BaseModel):
     status: TaskStatus = TaskStatus.PENDING
     progress_msg: str = "准备执行..."  # 实时进度描述
     result: Optional[str] = None
+    subscribed_sessions: List[str] = Field(default_factory=list)
     created_at: float = Field(default_factory=time.time)
     updated_at: float = Field(default_factory=time.time)
 
@@ -34,6 +35,20 @@ class TaskRegistry:
     def __init__(self):
         self._tasks: Dict[str, TaskRecord] = {}
         self._lock = asyncio.Lock()  # 保证高并发下的异步安全
+
+    async def subscribe_session(self, task_id: str, session_id: str):
+        """将特定会话加入任务的事件广播监听池"""
+        async with self._lock:
+            if task_id in self._tasks:
+                if session_id and session_id not in self._tasks[task_id].subscribed_sessions:
+                    self._tasks[task_id].subscribed_sessions.append(session_id)
+
+    async def get_subscribers(self, task_id: str) -> List[str]:
+        """获取该任务的所有订阅会话 ID"""
+        async with self._lock:
+            if task_id in self._tasks:
+                return list(self._tasks[task_id].subscribed_sessions)
+            return []
 
     async def register_task(self, task_id: str, description: str) -> TaskRecord:
         """注册一个新任务"""

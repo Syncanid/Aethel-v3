@@ -13,7 +13,7 @@ from core.infrastructure.api_client import GenericAPIClient
 from core.infrastructure.config_loader import Config
 from core.infrastructure.database import Database
 from core.io.event_bus import EventBus
-from core.io.event_schema import OneBotEvent, DetailType, EventType, Action
+from core.io.event_schema import OneBotEvent, DetailType, EventType, Action, EventSource
 from core.kernel.task_registry import global_task_registry
 from core.limbic.manager import LimbicManager
 from core.memory.infinite_context import InfiniteContextManager
@@ -342,6 +342,9 @@ class TaskEngine:
                 self.tool_manager.agent_state = self.scratchpad
                 self.last_response_used_tools = True
                 await global_task_registry.register_task(task_id, description)
+                origin_session = params.get("origin_session")
+                if origin_session:
+                    await global_task_registry.subscribe_session(task_id, origin_session)
 
                 # 读取基础 prompt
                 try:
@@ -522,21 +525,23 @@ class TaskEngine:
         except Exception as e:
             final_result = f"System Crash: {str(e)}"
             logger.error(f"❌ [System 2] 任务执行崩溃: {e}", exc_info=True)
-            await global_task_registry.complete_task(task_id, final_result)
 
-            complete_event = OneBotEvent(
-                type=EventType.TASK,
-                detail_type=DetailType.TASK_COMPLETE,
-                source=source,
-                extra={"task_payload": {
-                    "task_id": task_id,
-                    "result": final_result,
-                    "status": "failure",
-                    "description": description
-                }}
-            )
-            self.event_bus.publish_event(complete_event)
+            self.task_status["finished"] = True
+            self.task_status["final_result"] = final_result
+            self.task_status["status"] = "failure"
+
+            await global_task_registry.complete_task(task_id, final_result)
             await self.save_checkpoint(is_stable=False)
+
+            # 调用发射器进行多路灾难广播
+            await self._broadcast_task_event(
+                task_id=task_id,
+                detail_type=DetailType.TASK_COMPLETE,
+                result=final_result,
+                status="failure",
+                description=description
+            )
+
         finally:
             # 任务结束，打包并持久化黑匣子记录
             record_dir = "data/task_records"
@@ -554,19 +559,16 @@ class TaskEngine:
             try:
                 await global_task_registry.complete_task(task_id, self.task_status["final_result"])
 
-                # 发送回 EventBus 唤醒 S1
-                complete_event = OneBotEvent(
-                    type=EventType.TASK,
-                    detail_type=DetailType.TASK_COMPLETE,
-                    source=source,
-                    extra={"task_payload": {
-                        "task_id": task_id,
-                        "result": self.task_status["final_result"],
-                        "status": self.task_status["status"],
-                        "description": description
-                    }}
-                )
-                self.event_bus.publish_event(complete_event)
+                # 如果不是异常引起的进入 finally (状态为 normal/success 时)，执行完结广播
+                # 避免与 except 块中的崩溃广播重复发送
+                if self.task_status["status"] != "failure":
+                    await self._broadcast_task_event(
+                        task_id=task_id,
+                        detail_type=DetailType.TASK_COMPLETE,
+                        result=self.task_status["final_result"],
+                        status=self.task_status["status"],
+                        description=description
+                    )
 
                 filepath = os.path.join(record_dir, f"{task_id}.json")
                 async with aiofiles.open(filepath, "w", encoding="utf-8") as f:
@@ -706,6 +708,48 @@ class TaskEngine:
                     context.append("- 警告: 当前为 PowerShell 环境，禁用 Bash 专属操作符，复杂命令请用 `cmd /c` 桥接。")
 
         return "\n".join(context)
+
+    def _create_multicast_source(self, session_id: str) -> EventSource:
+        """将订阅 ID 转换为合法的 EventSource 路由坐标"""
+        if session_id.startswith("group_"):
+            return EventSource(platform="internal", group_id=session_id.replace("group_", ""))
+        elif session_id.startswith("private_"):
+            return EventSource(platform="internal", user_id=session_id.replace("private_", ""))
+        return EventSource(platform="internal")
+
+    async def _broadcast_task_event(self, task_id: str, detail_type: str, result: str, status: str, description: str):
+        """
+        [多路复用核心] 强制接管所有 S2 向外抛出的生命周期事件。
+        严格确保无论任务由哪一条控制流退出（正常/崩溃/强制取消），
+        所有的物理订阅节点都能收到无差异的同频共振信号。
+        """
+        subscribers = await global_task_registry.get_subscribers(task_id)
+        if not subscribers:
+            subscribers = ["internal_default"]
+
+        for session_id in subscribers:
+            # 动态坐标解析
+            target_source = EventSource(platform="internal")
+            if session_id.startswith("group_"):
+                target_source.group_id = session_id.replace("group_", "")
+            elif session_id.startswith("private_"):
+                target_source.user_id = session_id.replace("private_", "")
+
+            # 构建原子化跨域事件
+            event = OneBotEvent(
+                type=EventType.TASK,
+                detail_type=detail_type,
+                source=target_source,
+                extra={"task_payload": {
+                    "task_id": task_id,
+                    "result": result,
+                    "status": status,
+                    "description": description
+                }}
+            )
+            self.event_bus.publish_event(event)
+
+        logger.info(f"📡 [TaskEngine] 任务 {task_id} 状态 [{status}] 已向 {len(subscribers)} 个端点完成量子隧穿。")
 
     async def _call_llm(self) -> Dict[str, Any]:
         """
