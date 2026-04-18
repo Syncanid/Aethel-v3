@@ -20,8 +20,8 @@ TERMINAL_SESSIONS: Dict[str, Dict[str, Any]] = {}
 DELIMITER_PREFIX = "[===AETHEL_CMD_DONE:"
 DELIMITER_SUFFIX = "===]"
 
-# 为 32K 模型设定安全极限
-MAX_SAFE_TOKENS = 30000
+# 为模型设定安全极限
+MAX_SAFE_TOKENS = 15000
 
 IS_WINDOWS = os.name == 'nt'
 

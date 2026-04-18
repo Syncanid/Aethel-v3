@@ -253,3 +253,119 @@ async def get_group_members(ob_adapter: OneBotV11Adapter, group_id: str) -> List
             "is_robot": member["is_robot"],
         })
     return members
+
+
+@register()
+async def handle_friend_add_request(ob_adapter: OneBotV11Adapter, flag: str, approve: bool = True, remark: str = "") -> \
+        Dict[str, Any]:
+    """
+    处理加好友请求
+    :param flag: 加好友请求的 flag (需从上报事件中获取)
+    :param approve: 是否同意请求，默认为 True
+    :param remark: 同意后的好友备注
+    """
+    payload = {
+        "flag": flag,
+        "approve": approve,
+        "remark": remark
+    }
+    resp = await ob_adapter.call_api("set_friend_add_request", payload)
+
+    if not resp or resp.get("status") != "ok":
+        return {"status": "error", "message": resp.get("message", "处理好友请求失败")}
+
+    return {"status": "success", "message": "好友请求处理成功"}
+
+
+@register()
+async def delete_friend(ob_adapter: OneBotV11Adapter, user_id: str, temp_block: bool = False,
+                        temp_both_del: bool = False) -> Dict[str, Any]:
+    """
+    删除好友（支持拉黑和双向删除）
+    :param user_id: 目标 QQ 号
+    :param temp_block: 是否加入黑名单 (拉黑)
+    :param temp_both_del: 是否双向删除
+    """
+    payload = {
+        "user_id": user_id,
+        "temp_block": temp_block,
+        "temp_both_del": temp_both_del
+    }
+    resp = await ob_adapter.call_api("delete_friend", payload)
+
+    if not resp or resp.get("status") != "ok":
+        return {"status": "error", "message": resp.get("message", f"删除好友 {user_id} 失败")}
+
+    return {"status": "success", "message": f"成功删除好友 {user_id}"}
+
+
+@register()
+async def handle_group_add_request(ob_adapter: OneBotV11Adapter, flag: str, sub_type: str, approve: bool = True,
+                                   reason: str = "") -> Dict[str, Any]:
+    """
+    处理加群请求或邀请
+    :param flag: 请求 flag (需从上报事件中获取)
+    :param sub_type: 请求类型 ('add' 为加群申请, 'invite' 为被邀请加入)
+    :param approve: 是否同意
+    :param reason: 拒绝时的理由
+    """
+    if sub_type not in ["add", "invite"]:
+        return {"status": "error", "message": "sub_type 必须为 'add' 或 'invite'"}
+
+    payload = {
+        "flag": flag,
+        "sub_type": sub_type,
+        "approve": approve,
+        "reason": reason
+    }
+    resp = await ob_adapter.call_api("set_group_add_request", payload)
+
+    if not resp or resp.get("status") != "ok":
+        return {"status": "error", "message": resp.get("message", "处理群请求失败")}
+
+    return {"status": "success", "message": "群请求处理成功"}
+
+
+@register()
+async def leave_group(ob_adapter: OneBotV11Adapter, group_id: str, is_dismiss: bool = False) -> Dict[str, Any]:
+    """
+    退出或解散群聊
+    :param group_id: 群号
+    :param is_dismiss: 是否解散群聊 (设为 True 需具备群主权限，否则为普通退群)
+    """
+    payload = {
+        "group_id": group_id,
+        "is_dismiss": is_dismiss
+    }
+    resp = await ob_adapter.call_api("set_group_leave", payload)
+
+    if not resp or resp.get("status") != "ok":
+        action = "解散" if is_dismiss else "退出"
+        return {"status": "error", "message": resp.get("message", f"{action}群 {group_id} 失败")}
+
+    return {"status": "success", "message": f"成功{'解散' if is_dismiss else '退出'}群 {group_id}"}
+
+
+@register()
+async def kick_group_members(ob_adapter: OneBotV11Adapter, group_id: str, user_ids: List[str],
+                             reject_add_request: bool = False) -> Dict[str, Any]:
+    """
+    批量踢出群成员
+    :param group_id: 群号
+    :param user_ids: 待踢出的 QQ 号列表
+    :param reject_add_request: 是否拒绝被踢出者的后续加群请求 (相当于群内拉黑)
+    """
+    if not user_ids:
+        return {"status": "error", "message": "未提供需要踢出的用户列表"}
+
+    payload = {
+        "group_id": group_id,
+        "user_id": user_ids,
+        "reject_add_request": reject_add_request
+    }
+    resp = await ob_adapter.call_api("set_group_kick_members", payload)
+
+    if not resp or resp.get("status") != "ok":
+        return {"status": "error", "message": resp.get("message", "批量踢出成员失败")}
+
+    return {"status": "success", "message": f"成功从群 {group_id} 踢出 {len(user_ids)} 名成员"}

@@ -83,51 +83,69 @@ class Hippocampus:
             self._sleep_cycle_loop()
         )
 
+    async def push_to_sensory_memory(self, session_id: str, msg: Dict):
+        """
+        [L1.5 极速感知输入通道]
+        纯内存操作，零 I/O 阻塞。将消息包装后推入海马体缓冲队列。
+        彻底切断与 Agent working_memory 的生命周期绑定。
+        """
+        wal_id = str(id(msg))
+        pure_text = self._extract_text_for_memory(msg.get("content", ""))
+
+        mem_msg = {
+            "role": msg.get("role", "unknown"),
+            "content": pure_text,
+            "metadata": dict(msg.get("metadata", {}))  # 浅拷贝，防止原对象突变
+        }
+        mem_msg["metadata"]["_wal_id"] = wal_id
+        mem_msg["metadata"]["_source_session"] = session_id
+
+        # 动态创建一个内部暂存队列（如果尚未初始化）
+        if not hasattr(self, 'fast_sensory_queue'):
+            self.fast_sensory_queue = asyncio.Queue()
+
+        self.fast_sensory_queue.put_nowait(mem_msg)
+
     async def _ingest_loop(self):
         """
-        [Fast Lane] 极速感知循环
-        只负责从 history 中识别新消息并推入队列，不进行重型计算。
+        [Fast Lane] 极速 WAL 落盘循环
         """
+        if not hasattr(self, 'fast_sensory_queue'):
+            self.fast_sensory_queue = asyncio.Queue()
+
         while self.is_running:
             try:
-                new_msgs = self._scan_delta()
-                for msg in new_msgs:
-                    # 生成唯一 ID
-                    wal_id = str(id(msg))
+                # 阻塞等待新消息推送
+                mem_msg = await self.fast_sensory_queue.get()
+                wal_id = mem_msg["metadata"]["_wal_id"]
+                pure_text = mem_msg["content"]
 
-                    # 提取纯文本内容，将庞大的 Base64 彻底隔离在记忆系统之外
-                    pure_text = self._extract_text_for_memory(msg.get("content", ""))
-
-                    # 构建专供海马体消化的干净消息体 (切断与 Agent history 的引用污染)
-                    mem_msg = {
-                        "role": msg.get("role", "unknown"),
-                        "content": pure_text,
-                        "metadata": dict(msg.get("metadata", {})) # 浅拷贝元数据
-                    }
-                    mem_msg["metadata"]["_wal_id"] = wal_id
-
-                    # WAL 落盘
-                    # 必须在放入内存队列前完成，保证可靠性
-                    async with self.database.get_connection() as conn:
-                        await conn.execute(
-                            "INSERT OR IGNORE INTO wal_buffer (event_id, content, role, metadata_json, created_at) VALUES (?, ?, ?, ?, ?)",
-                            (
-                                wal_id,
-                                pure_text,
-                                mem_msg["role"],
-                                json.dumps(mem_msg["metadata"], ensure_ascii=False),
-                                time.time()
-                            )
+                # WAL 物理落盘 (保证哪怕进程被 Kill 也能在下次启动恢复)
+                async with self.database.get_connection() as conn:
+                    await conn.execute(
+                        "INSERT OR IGNORE INTO wal_buffer (event_id, content, role, metadata_json, created_at) VALUES (?, ?, ?, ?, ?)",
+                        (
+                            wal_id,
+                            pure_text,
+                            mem_msg["role"],
+                            json.dumps(mem_msg["metadata"], ensure_ascii=False),
+                            time.time()
                         )
-                        await conn.commit()
+                    )
+                    await conn.commit()
 
-                    # 4. 推入造梦队列
-                    await self.slow_lane_queue.put(mem_msg)
+                # 推入缓慢的造梦队列 (Slow Lane)
+                await self.slow_lane_queue.put(mem_msg)
+                self.fast_sensory_queue.task_done()
+
+                # 同步更新生物钟活跃状态
+                self.last_active_time = time.time()
 
             except Exception as e:
-                logger.error(f"Ingest loop error: {e}", exc_info=True)
+                logger.error(f"Ingest loop WAL write error: {e}", exc_info=True)
+                await asyncio.sleep(1) # 异常退避
 
-            await asyncio.sleep(2)  # 高频检查 (2s)
+            await asyncio.sleep(5)  # 高频检查
 
     async def _dream_loop(self):
         """

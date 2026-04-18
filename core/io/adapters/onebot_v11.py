@@ -106,6 +106,8 @@ class OneBotV11Adapter(BaseAdapter):
             post_type = data.get("post_type")
             if post_type == "message":
                 await self._process_message_event(data)
+            elif post_type == "request":
+                await self._process_request_event(data)
             elif post_type == "meta_event":
                 if data.get("meta_event_type") == "heartbeat":
                     # 心跳包通常忽略，或者用来更新状态
@@ -188,6 +190,31 @@ class OneBotV11Adapter(BaseAdapter):
             }
         )
 
+        self.event_bus.publish_event(event)
+
+    async def _process_request_event(self, data: Dict[str, Any]):
+        """将 OneBot 请求消息转换为 v3 标准事件"""
+        request_type = data.get("request_type")
+        user_id = str(data.get("user_id", ""))
+
+        source = EventSource(
+            platform=self.platform_name,
+            user_id=user_id,
+            group_id=str(data.get("group_id", "")) if request_type == "group" else None
+        )
+
+        event = OneBotEvent(
+            type=EventType.REQUEST,
+            detail_type=request_type,  # "friend" 或 "group"
+            source=source,
+            message=data.get("comment", ""),  # 将验证消息作为主体
+            raw_data=data,
+            extra={
+                "flag": data.get("flag", ""),
+                "comment": data.get("comment", ""),
+                "sub_type": data.get("sub_type", "")  # "add" 或 "invite"
+            }
+        )
         self.event_bus.publish_event(event)
 
     async def handle_action(self, action: Action) -> Optional[ActionResponse]:

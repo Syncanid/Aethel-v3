@@ -1,9 +1,11 @@
 # core/kernel/task_engine.py
 import asyncio
+import copy
 import json
 import logging
 import os
 import platform
+import random
 import time
 from typing import List, Dict, Any, Optional
 
@@ -77,7 +79,7 @@ class TaskEngine:
         self.last_response_content = ""
 
         # --- 事件队列与订阅 ---
-        self.incoming_events: asyncio.Queue = asyncio.Queue()
+        self.incoming_events = None
         self.event_bus.subscribe_event(self._enqueue_event)
 
         # 任务控制
@@ -88,6 +90,9 @@ class TaskEngine:
         """回调：过滤并把 TASK 事件放入队列"""
         # 判断如果是我们要的任务事件才塞入
         if getattr(event, "type", "") == EventType.TASK or getattr(event, "type", "") == "task":
+            # 惰性初始化，确保 Queue 绝对绑定在当前激活的事件循环上
+            if self.incoming_events is None:
+                self.incoming_events = asyncio.Queue()
             await self.incoming_events.put(event)
 
     async def _on_task_update(self, event: OneBotEvent):
@@ -244,6 +249,9 @@ class TaskEngine:
         logger.info("⚙️ Task Engine (System 2) 已启动...")
         await self.tool_manager.initialize()
 
+        if self.incoming_events is None:
+            self.incoming_events = asyncio.Queue()
+
         if await self.load_latest_checkpoint():
             self._running_task_coro = asyncio.create_task(
                 self._execute_long_loop(
@@ -273,7 +281,7 @@ class TaskEngine:
 
                     task_id = payload.get("task_id")
                     description = payload.get("description")
-                    params = payload.get("parameters", {})
+                    params = copy.deepcopy(payload.get("parameters", {}))
 
                     # 拉起长循环协程
                     self._running_task_coro = asyncio.create_task(
@@ -308,8 +316,20 @@ class TaskEngine:
                         self.scratchpad["progress_summary"] = f"收到补充信息，正在重新评估..."
                         await global_task_registry.update_progress(task_id, self.scratchpad["progress_summary"])
 
+            except RuntimeError as e:
+                if "different event loop" in str(e) or "Event loop is closed" in str(e):
+                    logger.warning("🛑 [System 2] 检测到事件循环关闭或跨域污染，Task Engine 主动终结退出。")
+                    break
+                logger.error(f"Task Engine 运行时异常: {e}", exc_info=True)
+                await asyncio.sleep(1)  # 强制退避，防止 CPU 锁死
+
+            except asyncio.CancelledError:
+                logger.info("🛑 [System 2] 收到系统取消信号，Task Engine 正在挂起...")
+                break  # 正常关闭
+
             except Exception as e:
                 logger.error(f"Task Engine 监听循环异常: {e}", exc_info=True)
+                await asyncio.sleep(1)  # 强制退避，防止未知错误导致的无限刷屏
 
     async def _execute_long_loop(self, task_id: str, description: str, params: dict, source, is_resume: bool = False):
         """
@@ -711,10 +731,13 @@ class TaskEngine:
 
     def _create_multicast_source(self, session_id: str) -> EventSource:
         """将订阅 ID 转换为合法的 EventSource 路由坐标"""
-        if session_id.startswith("group_"):
-            return EventSource(platform="internal", group_id=session_id.replace("group_", ""))
-        elif session_id.startswith("private_"):
-            return EventSource(platform="internal", user_id=session_id.replace("private_", ""))
+        # 切割格式：'group' 和 'onebot:12345'
+        ctx_type, puid = session_id.split('_', 1)
+        # 进一步切割出平台与纯数字 ID
+        plat, ctx_id = puid.split(':', 1)
+
+        if ctx_type in ["group", "private"]:
+            return EventSource(platform=plat, group_id=ctx_id)
         return EventSource(platform="internal")
 
     async def _broadcast_task_event(self, task_id: str, detail_type: str, result: str, status: str, description: str):
@@ -727,13 +750,25 @@ class TaskEngine:
         if not subscribers:
             subscribers = ["internal_default"]
 
-        for session_id in subscribers:
+        for index, session_id in enumerate(subscribers):
+            # 【核心盲注】：事件错峰分流。
+            # 第一个订阅节点立即收到响应，后续节点依次被强加 0.1秒 ~ 1.0秒的随机散列延迟。
+            if index > 0:
+                jitter_delay = random.uniform(0.1, 1.0)
+                await asyncio.sleep(jitter_delay)
+
             # 动态坐标解析
             target_source = EventSource(platform="internal")
-            if session_id.startswith("group_"):
-                target_source.group_id = session_id.replace("group_", "")
-            elif session_id.startswith("private_"):
-                target_source.user_id = session_id.replace("private_", "")
+            # 切割格式：'group' 和 'onebot:12345'
+            ctx_type, puid = session_id.split('_', 1)
+            # 进一步切割出平台与纯数字 ID
+            plat, ctx_id = puid.split(':', 1)
+
+            target_source.platform = plat
+            if ctx_type == "group":
+                target_source.group_id = ctx_id
+            elif ctx_type == "private":
+                target_source.user_id = ctx_id
 
             # 构建原子化跨域事件
             event = OneBotEvent(

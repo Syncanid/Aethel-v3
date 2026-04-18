@@ -52,9 +52,10 @@ class AttentionFilter:
 
     def _get_context_id(self, event: OneBotEvent) -> str:
         """获取当前事件的上下文 ID"""
+        platform_name = getattr(event.source, "platform", "unknown")
         if event.source.group_id:
-            return f"group_{event.source.group_id}"
-        return f"private_{event.source.user_id}"
+            return f"group_{platform_name}:{event.source.group_id}"
+        return f"private_{platform_name}:{event.source.user_id}"
 
     def _update_inertia(self, event: OneBotEvent):
         """更新对话惯性时间戳"""
@@ -283,15 +284,19 @@ class AttentionFilter:
 
 【绝对决策准则】(必须严格对应 decision 字段)
 1. "REPLY" (必须回复)：
-   - 触发条件：对方明确 @ 了你，或者消息内容明确是对你上一句发言的提问/延续。
-   - 约束：如果没有明确指向你，绝对禁止使用 REPLY。
+   - 触发条件：满足以下任一情况即可触发：
+     a) 处于【私聊】环境（天然具备明确指向性）。
+     b) 在群聊中对方明确 @ 了你。
+     c) 消息是对你上一句发言的延续。
+     d) 极其基础的社交握手（如“你好”、“在吗”），且你当前的意愿足够击穿阻力。
+   - 约束：在【群聊】中，如果既没有明确指向你，也不是社交握手，绝对禁止使用 REPLY。
 2. "INTERJECT" (主动插话)：
-   - 触发条件：你没有被点名，但消息内容与你的【认知兴趣点】高度契合，且包含具有高信息密度的技术探讨或深刻见解。你可以强行无视当前阻力值进行插话。
-   - 约束：严禁对毫无营养的闲聊、捧哏（如“好强”、“确实”）或毫无技术增量的日常感叹进行插话。
+   - 触发条件：你没有被点名，但话题与你的【认知兴趣点】高度契合且有技术深度。
+   - 约束：严禁对纯粹的表情包或无意义的日常感叹（如“确实”、“草”）进行插话。
 3. "SILENT_OBSERVE" (积极静默)：
    - 触发条件：对方虽然指向了你，但你当前阻力值极高（极度疲惫），或对方的话语极度无聊，你决定“已读不回”。
 4. "OBSERVE" (普通观察)：
-   - 触发条件：你没有被点名的话题，且话题不足以触发你的兴趣，或者你当前的“意愿置信度”无法击穿当前的阻力值({threshold:.2f})。
+   - 触发条件：你没有被点名的话题，且话题不足以触发你的兴趣。
 5. "IGNORE" (纯粹噪音)：
    - 触发条件：毫无意义的乱码、纯表情包刷屏，你连观察的兴趣都没有。
 
@@ -335,11 +340,11 @@ class AttentionFilter:
             confidence = float(result.get("confidence", 0.0))
             reason = result.get("reason", "无明确原因")
 
-            logger.info(f"🧠 [Attention Eval] 意愿: {confidence:.2f} | 阻力: {threshold:.2f} | 决策: {decision} ({reason})")
+            logger.info(f"🧠 [Attention Eval] 置信度: {confidence:.2f} | 阻力: {threshold:.2f} | 决策: {decision} ({reason})")
 
             # 强逻辑收束：防止模型出现置信度低于阈值却强行 REPLY 的幻觉
             if decision in ["REPLY", "INTERJECT"] and confidence < threshold:
-                logger.warning(f"⚠️ [Attention] 模型决策倒挂，意愿({confidence})不足以击穿阻力({threshold})。强制降级为 SILENT_OBSERVE 或 OBSERVE。")
+                logger.warning(f"⚠️ [Attention] 模型决策倒挂，置信度({confidence})不足以击穿阻力({threshold})。强制降级为 SILENT_OBSERVE 或 OBSERVE。")
                 if is_private or is_mentioned:
                     return ReactionType.SILENT_OBSERVE
                 return ReactionType.OBSERVE

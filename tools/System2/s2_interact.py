@@ -13,10 +13,13 @@ logger = logging.getLogger(__name__)
 
 def _resolve_session_to_source(session_id: str) -> EventSource:
     """反向解析引擎"""
-    if session_id.startswith("group_"):
-        return EventSource(platform="internal", group_id=session_id.split("_")[1])
-    elif session_id.startswith("private_"):
-        return EventSource(platform="internal", user_id=session_id.split("_")[1])
+    # 切割格式：'group' 和 'onebot:12345'
+    ctx_type, puid = session_id.split('_', 1)
+    # 进一步切割出平台与纯数字 ID
+    plat, ctx_id = puid.split(':', 1)
+
+    if ctx_type in ["group", "private"]:
+        return EventSource(platform=plat, group_id=ctx_id)
     return EventSource(platform="internal")
 
 

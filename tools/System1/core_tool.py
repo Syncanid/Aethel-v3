@@ -1,14 +1,15 @@
-# tools/core_tool.py
+# tools/System1/core_tool.py
 import asyncio
 import datetime
 import logging
+import time
 from typing import Any, Optional, List, Literal
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dateutil import parser
 
 from core.io.event_bus import EventBus
-from core.io.event_schema import Action, ActionStatus
+from core.io.event_schema import Action, ActionStatus, EventSource, OneBotEvent, DetailType, EventType
 from core.kernel.agent import AutonomousAgent
 from core.kernel.task_registry import global_task_registry
 from core.limbic.manager import LimbicManager
@@ -33,39 +34,24 @@ async def _dispatch_wake_up(event_bus: EventBus, reason: str):
     event_bus.publish_event(event)
 
 
-@register()
-async def send_message(
+# --- 内部辅助函数：执行消息发送流水线 ---
+async def _execute_send_message(
         message: str,
         platform: str,
         target_id: str,
-        target_type: Literal["private", "group", "channel"],
-        wait_minutes: Optional[float] = None,
-        event_bus: EventBus = None,
-        agent: AutonomousAgent = None,
-        scheduler: AsyncIOScheduler = None,
-        fragmenter: Any = None,
+        target_type: str,
+        wait_minutes: Optional[float],
+        event_bus: EventBus,
+        agent: AutonomousAgent,
+        scheduler: AsyncIOScheduler,
+        fragmenter: Any
 ) -> str:
-    """
-    发送消息。支持指定发送目标（私聊/群组）。
-    发送消息之前必须获取基本信息（平台和用户ID/群组ID）。
-    如果你希望在发送完这条消息后立刻进入等待/休眠状态，请填写 wait_minutes 参数。
-
-    Args:
-        message: 消息内容。
-        platform: 目标平台（PUID的前半部分）。
-        target_id: 目标user_id或group_id（PUID的后半部分）。
-        target_type: 消息类型 ('private', 'group', 'channel')。
-        wait_minutes: (可选) 发送后等待的分钟数，小于等于0或为空则不等待。
-    """
-
+    """抽象出的底层发送逻辑（碎片化 -> 打字延迟 -> 发送 -> 休眠）"""
     if not target_id:
         return "错误: 无法确定发送目标 (target_id 为空)。"
 
     # 1. 情绪碎片化处理
     try:
-        # 延迟导入我们上一阶段编写的 OutputFragmenter
-        from core.io.fragmentation import OutputFragmenter
-
         # 尝试从 agent 实例中获取 limbic 状态
         if agent and hasattr(agent, "limbic"):
             state = await agent.limbic.get_state()
@@ -74,9 +60,6 @@ async def send_message(
         else:
             # 如果获取不到状态，降级为整段发送，无延迟
             fragments = [(message, 0.0)]
-    except ImportError:
-        logger.warning("未找到 OutputFragmenter 模块，降级为普通发送模式。")
-        fragments = [(message, 0.0)]
     except Exception as e:
         logger.error(f"消息碎片化处理异常: {e}", exc_info=True)
         fragments = [(message, 0.0)]
@@ -121,13 +104,7 @@ async def send_message(
 
                 # 特殊错误：平台不存在
                 if "Route not matched" in error_msg:
-                    return (
-                        f"发送失败: 找不到平台适配器 '{platform}'。\n"
-                        f"可能原因：\n"
-                        f"1. 平台名称拼写错误\n"
-                        f"2. 该平台的适配器未在 main.py 中加载"
-                    )
-                # 如果某一个碎片发送失败，直接向 LLM 返回报错，打断后续连发
+                    return f"发送失败: 找不到平台适配器 '{platform}'。"
                 return f"发送失败 (片段 {index + 1}/{len(fragments)}): {error_msg}"
 
         except asyncio.TimeoutError:
@@ -155,6 +132,90 @@ async def send_message(
         logger.info(f"💤 消息发送完毕，已进入等待状态。")
 
     return final_status
+
+
+@register()
+async def send_message(
+        message: str,
+        wait_minutes: Optional[float] = None,
+        event_bus: EventBus = None,
+        agent: AutonomousAgent = None,
+        scheduler: AsyncIOScheduler = None,
+        fragmenter: Any = None,
+) -> str:
+    """
+    在【当前交互的会话】中顺着语境回复消息。
+    不需要指定平台和目标ID，系统会自动将其发送给刚刚和你说话的人/群。
+    如果你希望在发送完这条消息后立刻进入等待/休眠状态，请填写 wait_minutes 参数。
+
+    Args:
+        message: 消息内容。
+        wait_minutes: (可选) 发送后等待的分钟数，小于等于0或为空则不等待。
+    """
+    if not agent:
+        return "错误: 无法获取系统 Agent 上下文。"
+
+    last_context = agent.scratchpad.get("last_context", {})
+    platform = last_context.get("platform")
+    target_type = last_context.get("type")
+    target_id = last_context.get("id")
+
+    if not platform or not target_type or not target_id:
+        return "错误: 当前环境没有合法的对话上下文。如果你想主动寻找并向别人发送消息，请改用 create_session 工具。"
+
+    return await _execute_send_message(
+        message, platform, target_id, target_type, wait_minutes,
+        event_bus, agent, scheduler, fragmenter
+    )
+
+
+@register()
+async def create_session(
+        platform: str,
+        target_id: str,
+        target_type: Literal["private", "group"],
+        initial_message: str,
+        wait_minutes: Optional[float] = None,
+        event_bus: EventBus = None,
+        agent: AutonomousAgent = None,
+        scheduler: AsyncIOScheduler = None,
+        fragmenter: Any = None,
+) -> str:
+    """
+    从 0 创建一个全新的会话空间，并主动发出第一条破冰消息。
+    适用场景：当你突然想主动找某个人私聊，或者在内部冲动的驱使下想主动往某个群里发消息时使用。
+    调用此工具后，你的主意识焦点将自动切换至这个新会话中。
+
+    Args:
+        platform: 目标平台（通常为 "onebot"）。
+        target_id: 目标的 user_id 或 group_id。
+        target_type: "private" 或 "group"。
+        initial_message: 第一条发出的破冰消息内容。
+        wait_minutes: (可选) 发送后等待的分钟数。
+    """
+    if not agent:
+        return "错误: 无法获取系统 Agent 上下文。"
+
+    # 1. 强制焦点切换：修改全局环境定位指针
+    session_id = f"{target_type}_{platform}:{target_id}"
+
+    agent.active_session_id = session_id
+    agent.scratchpad["last_context"] = {
+        "platform": platform,
+        "type": target_type,
+        "id": target_id
+    }
+
+    # 2. 如果内存中不存在该会话，直接初始化（保证 Prompt 系统能够顺利载入）
+    if session_id not in agent.working_memory:
+        agent.working_memory[session_id] = [{"role": "system", "content": "INITIALIZING NEW SESSION..."}]
+        logger.info(f"🆕 [create_session] 已强制建立并劫持焦点至全新认知会话: {session_id}")
+
+    # 3. 直接顺流发出第一条消息
+    return await _execute_send_message(
+        initial_message, platform, target_id, target_type, wait_minutes,
+        event_bus, agent, scheduler, fragmenter
+    )
 
 
 @register()
@@ -254,13 +315,6 @@ async def wait_forever(
     return None
 
 
-import time
-from core.io.event_schema import OneBotEvent, EventType, DetailType, EventSource
-from core.io.event_bus import EventBus
-
-
-# 确保你的文件中已经导入了 @register
-
 @register()
 async def cross_session_dispatch(
         target_session_id: str,
@@ -275,7 +329,7 @@ async def cross_session_dispatch(
     跨越当前物理空间，前往另一个群聊或私聊去寻找特定人员，并传达信息或交接任务。
     使用此工具后，你的主意识会立刻被传送到目标房间，并使用目标房间的身份面具与对方说话。
 
-    :param target_session_id: 必须精准提供目标空间的 ID (格式如 group_12345, private_67890)。
+    :param target_session_id: 必须精准提供目标空间ID (格式如 group_onebot:12345, private_console:67890)。
     :param directive_reason: 你跨区找他的核心目的与原因 (例如：'转达刚才群里的报错信息')。
     :param carried_context: 你需要携带的情报、上下文 (请尽可能详细)。
     :param target_puid: 你要找的具体目标人员的 PUID。如果是向全群广播，可留空。

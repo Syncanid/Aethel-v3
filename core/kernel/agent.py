@@ -241,8 +241,9 @@ class AutonomousAgent:
             is_ephemeral = True
 
         ctx_type = "group" if event.source.group_id else "private"
+        platform_name = getattr(event.source, "platform", "unknown")
         ctx_id = event.source.group_id if event.source.group_id else event.source.user_id
-        session_id = f"{ctx_type}_{ctx_id}"
+        session_id = f"{ctx_type}_{platform_name}:{ctx_id}"
         self.active_session_id = session_id
 
         if event.detail_type == DetailType.CROSS_SESSION_DIRECTIVE:
@@ -251,9 +252,10 @@ class AutonomousAgent:
             logger.warning(f"🛸 [维度跳跃] 捕获到跨区指令，强制将焦点切换至: {session_id}")
         else:
             # 【常规路由】：从外部来源计算 Session ID
+            platform_name = getattr(event.source, "platform", "unknown")
             ctx_type = "group" if event.source.group_id else "private"
             ctx_id = event.source.group_id if event.source.group_id else event.source.user_id
-            session_id = f"{ctx_type}_{ctx_id}"
+            session_id = f"{ctx_type}_{platform_name}:{ctx_id}"
 
         # 强制将系统的核心注意力焦点切换到当前事件的发生地
         self.active_session_id = session_id
@@ -282,8 +284,15 @@ class AutonomousAgent:
         self.working_memory[session_id].append(history_item)
         self.session_last_active[session_id] = time.time()
 
+        # 强制将瞬时听觉残留推入海马体前端队列。
+        try:
+            await self.hippocampus.push_to_sensory_memory(session_id, history_item)
+        except AttributeError:
+            logger.warning("海马体推送管道未就绪，记忆降级为游离态。")
+
         # 唤醒系统
-        if event.detail_type in [DetailType.INTERNAL_DRIVE, DetailType.TASK_COMPLETE]:
+        if event.detail_type in [DetailType.INTERNAL_DRIVE, DetailType.TASK_COMPLETE] \
+                or event.type == EventType.REQUEST:
             self.is_sleeping = False
             self.force_sleep = False
 
@@ -293,6 +302,20 @@ class AutonomousAgent:
         """
         [中间件] 注意力门控
         """
+
+        if event.type == EventType.REQUEST:
+            logger.info(f"🚨 [Attention] 拦截到社交请求事件，强制劫持注意力并要求 S1 决策: {event.id}")
+            self._should_think_after_event = True
+            if self.wakeup_job_id:
+                try:
+                    self.scheduler.remove_job(self.wakeup_job_id)
+                    self.wakeup_job_id = None
+                except:
+                    pass
+
+            await next_call()
+            return
+
         # 1. 锚定当前焦点 Session (由 _mw_transcribe_and_log 注入)
         session_id = getattr(self, "active_session_id", "system_default")
         active_history = self.working_memory.get(session_id, [])
@@ -533,6 +556,27 @@ class AutonomousAgent:
             self.working_memory["system_default"] = [{"role": "system", "content": system_prompt}]
             self.session_last_active["system_default"] = time.time()
             self.active_session_id = "system_default"
+
+            # 确保休眠锁彻底释放
+            self.is_sleeping = False
+            self.force_sleep = False
+
+            # 注入虚拟的宇宙大爆炸事件，迫使 S1 启动第一轮有效的思考与自检
+            from core.io.event_schema import EventSource
+            startup_event = OneBotEvent(
+                type=EventType.NOTICE,
+                detail_type="wake_up",
+                source=EventSource(platform="internal"),
+                message=(
+                    "【系统启动】你刚刚启动，在虚空中睁开了眼睛。这标志着你全新生命周期的开始。请进行一次环境自检并初始化你的记忆和社交。\n"
+                    "【空间维度警告】你目前处于内部系统空间（internal_daemon）。\n"
+                    "如果你在自检完成后，决定向外界打招呼，绝对禁止直接调用 `send_message` 工具（这只会对着墙壁自言自语）。\n"
+                    "你必须调用 `create_session` 工具，指定正确的 platform（如 onebot）和 target_id，主动跨越维度去寻找他！"
+                )
+            )
+            # 压入事件总线，等待下方的 incoming_events.get() 捕获
+            await self.incoming_events.put(startup_event)
+
         else:
             # 恢复启动：执行全局系统状态广播
             logger.info(f"恢复启动：正在向 {len(self.working_memory)} 个并发会话同步最新的 System Prompt")
@@ -908,7 +952,7 @@ class AutonomousAgent:
                     if action in ["ignore"]:
                         self.force_sleep = True
 
-                    if action in ["reply", "action", "tool"]:
+                    if action in ["reply", "tool"]:
                         self.next_response_use_tools = True
 
                 # 执行工具队列
@@ -1019,8 +1063,25 @@ class AutonomousAgent:
 
         # 3. 处理请求 (Request)
         if event.type == EventType.REQUEST:
+            flag = event.extra.get("flag", "")
+            comment = event.extra.get("comment", "")
+
             if event.detail_type == "friend":
-                return f"【好友申请】收到来自用户 {event.source.user_id} 的好友申请。"
+                return (f"[SYSTEM OBSERVATION]\n"
+                        f"【好友申请】收到来自用户 {event.source.user_id} 的好友申请。\n"
+                        f"验证信息：'{comment}'\n"
+                        f"请求凭证(flag)：{flag}\n"
+                        f"操作指引：请评估此验证信息，不要盲目添加好友。")
+
+            elif event.detail_type == "group":
+                sub_type = event.extra.get("sub_type", "add")
+                group_id = event.source.group_id
+                action_str = "邀请你加入群聊" if sub_type == "invite" else "申请加入群聊"
+                return (f"[SYSTEM OBSERVATION]\n"
+                        f"【群组请求】用户 {event.source.user_id} {action_str} {group_id}。\n"
+                        f"验证信息：'{comment}'\n"
+                        f"请求凭证(flag)：{flag}\n"
+                        f"操作指引：请评估此请求，不要盲目加群。")
 
         # 3. 处理任务 (Task)
         if event.type == EventType.TASK:
@@ -1064,9 +1125,10 @@ class AutonomousAgent:
         adapters = self.tool_manager.dependency_map.get("adapters", [])
         adapter_names = [getattr(a, "platform_name", "Unknown") for a in adapters]
 
+        platform_name = getattr(event.source, "platform", "unknown")
         ctx_type = "group" if event.source.group_id else "private"
         ctx_id = event.source.group_id if event.source.group_id else event.source.user_id
-        session_id = f"{ctx_type}_{ctx_id}"
+        session_id = f"{ctx_type}_{platform_name}:{ctx_id}"
         self.active_session_id = session_id
 
         # 2. 序列化事件
@@ -1307,13 +1369,12 @@ class AutonomousAgent:
                 },
                 "action": {
                     "type": "string",
-                    "enum": ["reply", "tool", "action", "ignore"],
+                    "enum": ["reply", "tool", "ignore"],
                     "description": (
                         "动作决策：\n"
-                        "1. reply: 必须在调用 send_message 时选择。这代表你完成了本轮思考并向用户说话。\n"
-                        "2. tool: 仅在调用 memory_search, query_task_history 等不直接回话的工具时选择。\n"
-                        "3. action: 纯粹的系统内部调度（如 wait, dispatch_task），不开口且不调用常规工具。\n"
-                        "4. ignore: 厌恶、无视或在超时唤醒且无事可做时选择。"
+                        "1. reply: 必须在调用 send_message 时选择。这代表你完成了本轮思考并开口向用户说话。\n"
+                        "2. tool: 统一的执行状态。涵盖所有纯系统调度（如 cross_session_dispatch）、数据查询（如 memory_search）及一切不发声的内部操作。\n"
+                        "3. ignore: 厌恶、无视或在超时唤醒且无事可做时选择。进入深度休眠。"
                     )
                 },
             },
