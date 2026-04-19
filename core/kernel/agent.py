@@ -52,6 +52,8 @@ class AutonomousAgent:
 
         self.global_blackboard: Dict[str, Dict[str, Any]] = {}
         self.active_session_id: str = "system_default"
+
+        # --- 强制休眠标记 ---
         self.force_sleep = False
 
         # 初始化注意力门控系统
@@ -124,6 +126,27 @@ class AutonomousAgent:
         self._should_think_after_event: bool = False
 
         self.current_tokens = 0
+
+    # ==========================================
+    # 向下兼容代理
+    # 防止未修改的老工具抛出 AttributeError
+    # ==========================================
+    @property
+    def scratchpad(self) -> Dict[str, Any]:
+        """动态路由到当前上下文的暂存板"""
+        return self.session_scratchpads.get(self.active_session_id, {})
+
+    @scratchpad.setter
+    def scratchpad(self, value: Dict[str, Any]):
+        self.session_scratchpads[self.active_session_id] = value
+
+    @property
+    def last_response_content(self) -> str:
+        return self.session_last_responses.get(self.active_session_id, "")
+
+    @last_response_content.setter
+    def last_response_content(self, value: str):
+        self.session_last_responses[self.active_session_id] = value
 
     def _setup_middlewares(self):
         """注册中间件链"""
@@ -260,9 +283,10 @@ class AutonomousAgent:
 
         # 3. 会话隔离与初始化防空指针
         if session_id not in self.working_memory:
-            # 严格规约：任何新会话的 index 0 必须被 System Prompt 独占
-            # 这里先用占位符预分配空间，主循环唤醒时会动态覆盖它
-            self.working_memory[session_id] = [{"role": "system", "content": "INITIALIZING..."}]
+            self.working_memory[session_id] = [
+                {"role": "system", "content": "INITIALIZING..."},
+                {"role": "user", "content": "【系统心跳】会话通道已建立。"}
+            ]
             logger.info(f"🆕 开启全新独立认知会话: {session_id}")
 
         # 4. 执行物理隔离追加
@@ -319,13 +343,13 @@ class AutonomousAgent:
 
         if reaction == ReactionType.IGNORE:
             logger.info(f"🗑️ [Observer] 决定无视: {event.id}")
-            if not current_goal:
+            if not current_goal and not any(self.session_next_use_tools.values()):
                 self.force_sleep = True
             self._should_think_after_event = False
 
         elif reaction == ReactionType.OBSERVE:
             logger.info(f"🤐 [Observer] 决定保持沉默 (仅观察): {event.id}")
-            if not current_goal:
+            if not current_goal and not any(self.session_next_use_tools.values()):
                 self.force_sleep = True
             self._should_think_after_event = False
 
@@ -418,6 +442,7 @@ class AutonomousAgent:
         """统一持久化 S1 的完整运行状态"""
         try:
             state = {
+                "active_session_id": getattr(self, "active_session_id", "system_default"),
                 "working_memory": self.working_memory,
                 "session_last_active": self.session_last_active,
                 "session_willingness": self.session_willingness,
@@ -452,6 +477,8 @@ class AutonomousAgent:
                 row = await cursor.fetchone()
                 if row:
                     state = json.loads(row[0])
+
+                    self.active_session_id = state.get("active_session_id", "system_default")
                     self.working_memory = state.get("working_memory", {})
                     self.session_last_active = state.get("session_last_active", {})
                     self.session_willingness = state.get("session_willingness", {})
@@ -472,11 +499,7 @@ class AutonomousAgent:
                         if current_time - topic_data.get("timestamp", 0) <= 3600:
                             self.global_blackboard[sid] = topic_data
 
-                    logger.info(f"💾 状态恢复完成。载入了 {len(self.global_blackboard)} 个活跃热点。")
-
-                    session_count = len(self.working_memory)
-                    logger.info(
-                        f"🔄 成功恢复 S1 现场，并发会话数: {session_count} (上次运行时间: {time.ctime(state.get('timestamp', 0))})")
+                    logger.info(f"💾 状态恢复完成。当前焦点频道: {self.active_session_id}")
                     return True
         except Exception as e:
             logger.error(f"S1 状态恢复失败: {e}", exc_info=True)
@@ -521,7 +544,7 @@ class AutonomousAgent:
         logger.info("正在检测恢复...")
         has_state = await self.load_state()
 
-        os.makedirs("data/s2_debug", exist_ok=True)
+        os.makedirs("data/s1_debug", exist_ok=True)
 
         if not has_state:
             # 首次启动：在虚空中建立一个锚点，初始化默认系统会话
@@ -529,8 +552,10 @@ class AutonomousAgent:
             self.working_memory.clear()
             self.session_last_active.clear()
 
-            # 分配初始房间并注入世界观
-            self.working_memory["system_default"] = [{"role": "system", "content": system_prompt}]
+            self.working_memory["system_default"] = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": "【系统心跳】会话通道已建立。"}
+            ]
             self.session_last_active["system_default"] = time.time()
             self.active_session_id = "system_default"
 
@@ -585,8 +610,16 @@ class AutonomousAgent:
                 self._should_think_after_event = False
                 self._current_reaction: Optional[ReactionType] = None
 
-                # 强制休眠逻辑
-                # 如果系统判定当前应当“安静等待”且不是手动休眠模式
+                # 动态提权：如果存在未完成思考/工具链的活跃会话，强制剥夺休眠权
+                pending_sessions = [sid for sid, flag in self.session_next_use_tools.items() if flag]
+                if pending_sessions:
+                    self.force_sleep = False
+                    self.is_sleeping = False
+
+                    # 将焦点锁定到未完成的会话上，保证中断能被恢复
+                    if getattr(self, "active_session_id", "system_default") not in pending_sessions:
+                        self.active_session_id = pending_sessions[0]
+
                 if self.force_sleep and not self.is_sleeping:
                     # 阻塞式等待：直到有新事件才唤醒，彻底避免空转
                     event = await self.incoming_events.get()
@@ -730,8 +763,8 @@ class AutonomousAgent:
                     if active_puid:
                         relational_subtext += (
                             f"【目光焦点】：这是一个你脑海中没有任何记录的全新陌生人 (PUID: {active_puid})。\n"
-                            f"【情感内核】：这是你们的初次交互。由于对方不在记忆库中，请保持基础的礼貌与极高的戒备心（防备的陌生人）。\n"
-                            f"【社交捕获指令】：如果对方的发言不是纯粹的噪音，你【必须】在本次回复时调用 `social_record_user` 工具，为该 PUID 建立初始社交档案，赋予他一个合适的 nickname，并简要写下你的第一 impression。\n"
+                            f"【情感内核】：这是你们的初次交互。由于对方不在记忆库中，请保持基础的礼貌与极高的戒备心。\n"
+                            f"【社交捕获指令】：如果对方的发言不是纯粹的噪音，你必须调用 `social_record_user` 工具为该 PUID 建立初始档案。\n"
                         )
                     else:
                         relational_subtext += "【目光焦点】：当前无明确交互目标。\n"
@@ -772,7 +805,7 @@ class AutonomousAgent:
                                     f"\n<Blackboard_Echo>\n"
                                     f"【极其重要的社交情报】：检测到该用户提到的内容（关键词：{','.join(hit_keywords)}），与隔壁 [{sid}] 正在热议的话题高度重合！\n"
                                     f"【隔壁真实情况】：{topic_data['summary']}\n"
-                                    f"【防泄密行为锁】：注意！该用户【并未参与】那场讨论，他大概率不知道群里的情况。你可以表现出惊讶（“诶？你也在看这个？”），或者顺水推舟地把群里的情况【极其概括、选择性地】分享给他，但【绝对不能】机械照搬聊天记录或暴露其他群友的隐私！\n"
+                                    f"【防泄密行为锁】：你可以顺水推舟概括分享情况，但绝对不能照搬记录暴露群友隐私！\n"
                                     f"</Blackboard_Echo>\n"
                                 )
                             break  # 撞中一个最相关的就够了
@@ -941,7 +974,9 @@ class AutonomousAgent:
                     ))
 
                     if action in ["ignore"]:
-                        self.force_sleep = True
+                        self.session_next_use_tools[current_session] = False
+                        if not any(self.session_next_use_tools.values()):
+                            self.force_sleep = True
 
                     if action in ["reply", "tool"]:
                         self.session_next_use_tools[current_session] = True
@@ -1183,16 +1218,9 @@ class AutonomousAgent:
         logger.info(f"Event Ingested (Fallback): {event.type}.{event.detail_type} -> Routed to [{session_id}]")
 
     async def _active_retrieval(self, active_puid: str, last_obs: str, current_goal: str) -> List[str]:
-        query_parts = []
-        if current_goal:
-            query_parts.append(current_goal)
-        if last_obs:
-            query_parts.append(last_obs)
-
-        if not query_parts:
-            return []
-
-        query = " ".join(query_parts)
+        query_parts = [current_goal, last_obs]
+        query = " ".join([q for q in query_parts if q])
+        if not query: return []
         combined_memories = []
 
         try:
@@ -1382,25 +1410,3 @@ class AutonomousAgent:
             schema=thought_structure,
             require_tools=require_tools
         )
-
-    # ==========================================
-    # 向下兼容代理 (Backward Compatibility Proxies)
-    # 作用：让所有未适配并发架构的老工具，依然能通过 agent.scratchpad 无感读写当前活跃频道的暂存板
-    # ==========================================
-    @property
-    def scratchpad(self) -> Dict[str, Any]:
-        """动态路由到当前上下文的暂存板"""
-        return self.session_scratchpads.get(self.active_session_id, {})
-
-    @scratchpad.setter
-    def scratchpad(self, value: Dict[str, Any]):
-        """允许老工具覆盖当前暂存板"""
-        self.session_scratchpads[self.active_session_id] = value
-
-    @property
-    def last_response_content(self) -> str:
-        return self.session_last_responses.get(self.active_session_id, "")
-
-    @last_response_content.setter
-    def last_response_content(self, value: str):
-        self.session_last_responses[self.active_session_id] = value
