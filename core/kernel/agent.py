@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import os
 import time
 from typing import List, Dict, Any, Optional, Awaitable, Callable
 
@@ -520,6 +521,8 @@ class AutonomousAgent:
         logger.info("正在检测恢复...")
         has_state = await self.load_state()
 
+        os.makedirs("data/s2_debug", exist_ok=True)
+
         if not has_state:
             # 首次启动：在虚空中建立一个锚点，初始化默认系统会话
             logger.info("开始执行全新启动，建立系统默认认知会话 (system_default)")
@@ -540,10 +543,10 @@ class AutonomousAgent:
             startup_event = OneBotEvent(
                 type=EventType.NOTICE,
                 detail_type="wake_up",
-                source=EventSource(platform="internal"),
+                source=EventSource(platform="system"),
                 message=(
                     "【系统启动】你刚刚启动，在虚空中睁开了眼睛。这标志着你全新生命周期的开始。请进行一次环境自检并初始化你的记忆和社交。\n"
-                    "【空间维度警告】你目前处于内部系统空间（internal_daemon）。\n"
+                    "【空间维度警告】你目前处于内部系统空间。\n"
                     "如果你在自检完成后，决定向外界打招呼，绝对禁止直接调用 `send_message` 工具（这只会对着墙壁自言自语）。\n"
                     "你必须调用 `create_session` 工具，指定正确的 platform（如 onebot）和 target_id，主动跨越维度去寻找他！"
                 )
@@ -624,7 +627,10 @@ class AutonomousAgent:
 
                 # 建立并获取 Session 独占工作区与状态板
                 if current_session not in self.working_memory:
-                    self.working_memory[current_session] = [{"role": "system", "content": "INITIALIZING..."}]
+                    self.working_memory[current_session] = [
+                        {"role": "system", "content": "INITIALIZING..."},
+                        {"role": "user", "content": "【系统心跳】会话通道已建立。"}
+                    ]
                 active_history = self.working_memory[current_session]
 
                 if current_session not in self.session_scratchpads:
@@ -835,11 +841,8 @@ class AutonomousAgent:
 
                 # 调试日志落盘
                 try:
-                    async with aiofiles.open(f"data/messages_{current_session}.json", "w", encoding="utf-8") as f:
+                    async with aiofiles.open(f"data/s1_debug/messages_{current_session.replace(':', '_')}.json", "w", encoding="utf-8") as f:
                         await f.write(json.dumps(active_history, ensure_ascii=False, indent=4))
-
-                    async with aiofiles.open("data/prompt_in_memory.txt", "w", encoding="utf-8") as f:
-                        await f.write(final_system_prompt)
                 except Exception as e:
                     logger.warning(f"Failed to write debug logs: {e}")
 
@@ -993,7 +996,14 @@ class AutonomousAgent:
 
                 await self.save_state()
 
+            except asyncio.CancelledError:
+                # 显式捕获取消信号，直接退出循环，不要 sleep
+                logger.info("S1 接收到退出指令，正在关闭...")
+                break
             except Exception as e:
+                # 这里如果是 loop closed 错误，也直接跳出
+                if "Event loop is closed" in str(e):
+                    break
                 logger.error(f"S1 主循环异常: {e}", exc_info=True)
                 await asyncio.sleep(2)
 
@@ -1372,3 +1382,25 @@ class AutonomousAgent:
             schema=thought_structure,
             require_tools=require_tools
         )
+
+    # ==========================================
+    # 向下兼容代理 (Backward Compatibility Proxies)
+    # 作用：让所有未适配并发架构的老工具，依然能通过 agent.scratchpad 无感读写当前活跃频道的暂存板
+    # ==========================================
+    @property
+    def scratchpad(self) -> Dict[str, Any]:
+        """动态路由到当前上下文的暂存板"""
+        return self.session_scratchpads.get(self.active_session_id, {})
+
+    @scratchpad.setter
+    def scratchpad(self, value: Dict[str, Any]):
+        """允许老工具覆盖当前暂存板"""
+        self.session_scratchpads[self.active_session_id] = value
+
+    @property
+    def last_response_content(self) -> str:
+        return self.session_last_responses.get(self.active_session_id, "")
+
+    @last_response_content.setter
+    def last_response_content(self, value: str):
+        self.session_last_responses[self.active_session_id] = value

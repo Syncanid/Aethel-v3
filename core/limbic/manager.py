@@ -42,9 +42,15 @@ class LimbicManager:
         while self.is_running:
             try:
                 await self._tick()
+                await asyncio.sleep(600)  # 每 10 分钟进行一次评估
+            except asyncio.CancelledError:
+                logger.info("🛑 边缘系统接收到退出信号。")
+                break
             except Exception as e:
+                if "Event loop is closed" in str(e):
+                    break
                 logger.error(f"边缘系统运行异常: {e}", exc_info=True)
-            await asyncio.sleep(600)  # 每 10 分钟进行一次评估
+                await asyncio.sleep(60)  # 异常退避
 
     async def initialize(self):
         """初始化表结构"""
@@ -239,6 +245,7 @@ class LimbicManager:
         # 3. 严重内耗：消耗意志力（认知能量）
         state.cognitive_energy = max(0.0, state.cognitive_energy - fatigue_increase)
 
-        logger.info(f"🧠 [Limbic] 接受 S1 压抑指令！生存压力飙升至 {state.survival_pressure:.2f}，认知能量跌至 {state.cognitive_energy:.2f}")
+        logger.info(
+            f"🧠 [Limbic] 接受 S1 压抑指令！生存压力飙升至 {state.survival_pressure:.2f}，认知能量跌至 {state.cognitive_energy:.2f}")
 
         await self.save_state()

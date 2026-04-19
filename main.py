@@ -105,7 +105,7 @@ class AethelSystem:
         self.agent.tool_manager.add_dependency("adapters", self.adapters)
         self.agent.tool_manager.add_dependency("daemon_manager", self.daemon_manager)
 
-        self.task_engine.tool_manager.add_dependency("daemon_manager", self.daemon_manager)
+        self.task_engine.daemon_manager = self.daemon_manager
 
         # === 注册 GUI 监控点 ===
         self._register_monitors()
@@ -152,23 +152,27 @@ class AethelSystem:
         if not self.shutdown_event or self.shutdown_event.is_set():
             return
 
-        logger.warning("正在启动优雅退出流程...")
+        logger.warning("正在启动退出流程...")
         self.shutdown_event.set()
-
-        # 1. 取消所有任务
-        for task in self.tasks:
-            if not task.done():
-                task.cancel()
 
         # 强制停止所有后台脚本
         if self.daemon_manager:
             for d_name in list(self.daemon_manager.running_tasks.keys()):
                 self.daemon_manager.stop_daemon(d_name)
 
-        # 2. 等待任务结束
-        if self.tasks:
-            logger.info("正在等待后台任务终止...")
-            await asyncio.gather(*self.tasks, return_exceptions=True)
+        # 1. 捕获当前 loop 中所有的任务
+        loop = asyncio.get_running_loop()
+        current_task = asyncio.current_task(loop)
+        all_tasks = [t for t in asyncio.all_tasks(loop) if t is not current_task]
+
+        if all_tasks:
+            logger.info(f"正在向 {len(all_tasks)} 个后台异步任务发送取消信号...")
+            for task in all_tasks:
+                task.cancel()
+
+            # 2. 关键：等待所有任务处理完 CancelledError 的后事
+            logger.info("正在等待后台任务完成清理归档...")
+            await asyncio.gather(*all_tasks, return_exceptions=True)
 
         # 3. 关闭所有 API Client
         if self.agent and self.agent.api_client:

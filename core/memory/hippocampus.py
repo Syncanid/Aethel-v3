@@ -3,7 +3,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import List, Dict, Set
+from typing import List, Dict
 
 from core.evolution.mimicry import SocialMimicry
 from core.infrastructure.api_client import GenericAPIClient
@@ -20,18 +20,18 @@ class Hippocampus:
     def __init__(self, config: Config, limbic: LimbicManager, api_client: GenericAPIClient, database: Database,
                  agent_history: Dict):
         """
-        :param agent_history: 对 AutonomousAgent.history 的直接引用
+        海马体记忆中枢
         """
         self.config = config
         self.limbic = limbic
         self.api_client = api_client
         self.database = database
-        self.history_ref = agent_history  # 直接持有引用
+        self.history_ref = agent_history
         self.vector_store = VectorStore(database, api_client)
         self.is_running = False
 
-        # 状态追踪
-        self.processed_ids: Set[int] = set()
+        # 状态追踪与队列初始化
+        self.fast_sensory_queue = asyncio.Queue()
         self.slow_lane_queue = asyncio.Queue()  # 待处理队列
         self.mimicry = SocialMimicry(config, api_client)
 
@@ -40,9 +40,9 @@ class Hippocampus:
         self.last_deep_sleep_time = current_time
         self.last_active_time = current_time
 
-        # 归档配置
-        self.BUFFER_LIMIT = 5  # 积攒多少条触发
-        self.SILENCE_TIMEOUT = 60  # 静默多少秒触发
+        # 触发策略配置
+        self.BUFFER_LIMIT = self.config.get("memory.buffer_limit", 5)  # 积攒多少条触发
+        self.SILENCE_TIMEOUT = self.config.get("memory.silence_timeout", 60)  # 静默多少秒触发
 
     async def start(self):
         """启动海马体循环"""
@@ -72,10 +72,6 @@ class Hippocampus:
         except Exception as e:
             logger.error(f"WAL 恢复失败: {e}", exc_info=True)
 
-        # 标记当前历史为已处理
-        for msg in self.history_ref:
-            self.processed_ids.add(id(msg))
-
         # 并发启动两个独立循环
         await asyncio.gather(
             self._ingest_loop(),
@@ -95,14 +91,10 @@ class Hippocampus:
         mem_msg = {
             "role": msg.get("role", "unknown"),
             "content": pure_text,
-            "metadata": dict(msg.get("metadata", {}))  # 浅拷贝，防止原对象突变
+            "metadata": dict(msg.get("metadata", {}))
         }
         mem_msg["metadata"]["_wal_id"] = wal_id
         mem_msg["metadata"]["_source_session"] = session_id
-
-        # 动态创建一个内部暂存队列（如果尚未初始化）
-        if not hasattr(self, 'fast_sensory_queue'):
-            self.fast_sensory_queue = asyncio.Queue()
 
         self.fast_sensory_queue.put_nowait(mem_msg)
 
@@ -110,9 +102,6 @@ class Hippocampus:
         """
         [Fast Lane] 极速 WAL 落盘循环
         """
-        if not hasattr(self, 'fast_sensory_queue'):
-            self.fast_sensory_queue = asyncio.Queue()
-
         while self.is_running:
             try:
                 # 阻塞等待新消息推送
@@ -141,11 +130,14 @@ class Hippocampus:
                 # 同步更新生物钟活跃状态
                 self.last_active_time = time.time()
 
+            except asyncio.CancelledError:
+                logger.info("🛑 WAL 写入循环接收到退出信号。")
+                break
             except Exception as e:
+                if "Event loop is closed" in str(e):
+                    break
                 logger.error(f"Ingest loop WAL write error: {e}", exc_info=True)
-                await asyncio.sleep(1) # 异常退避
-
-            await asyncio.sleep(5)  # 高频检查
+                await asyncio.sleep(1)  # 异常退避
 
     async def _dream_loop(self):
         """
@@ -194,7 +186,12 @@ class Hippocampus:
                     buffer.clear()
                     last_dream_time = current_time
 
+            except asyncio.CancelledError:
+                logger.info("🛑 梦境整理循环接收到退出信号。")
+                break
             except Exception as e:
+                if "Event loop is closed" in str(e):
+                    break
                 logger.error(f"Dream loop error: {e}", exc_info=True)
                 await asyncio.sleep(5)
 
@@ -216,7 +213,7 @@ class Hippocampus:
 
                 # 2. 计算生物钟清醒驱力
                 time_since_sleep = current_time - self.last_deep_sleep_time
-                max_awake_limit = self.config.get("sleep.max_awake_seconds", 86400)  # 默认最长清醒24小时
+                max_awake_limit = self.config.get("sleep.max_awake_seconds", 86400)
                 circadian_score = min(time_since_sleep / max_awake_limit, 1.0)
 
                 # 3. 计算认知代谢压力
@@ -248,21 +245,33 @@ class Hippocampus:
                     try:
                         await self._compress_episodic_to_semantic()
                         await self._prune_graph_edges()
+                    except asyncio.CancelledError:
+                        raise  # 抛出外层处理
                     except Exception as inner_e:
                         logger.error(f"深度睡眠维护任务内部异常: {inner_e}", exc_info=True)
 
                     # 无论维护是否成功，都重置睡眠时钟，避免陷入死亡循环
                     self.last_deep_sleep_time = time.time()
 
-                    # 深度睡眠是一项极其消耗 CPU 的操作，完成后强制进行长周期休眠降温
-                    await asyncio.sleep(3600)
+                    # 深度睡眠完成后强制进行长周期休眠降温
+                    try:
+                        await asyncio.sleep(3600)
+                    except asyncio.CancelledError:
+                        break
                     continue
 
+            except asyncio.CancelledError:
+                break
             except Exception as e:
+                if "Event loop is closed" in str(e):
+                    break
                 logger.error(f"睡眠周期驱力评估引擎异常: {e}", exc_info=True)
 
-            # 采用弹性轮询，避免空耗 CPU，没必要像原代码一样每 30 秒查一次
-            await asyncio.sleep(300)
+            try:
+                # 采用弹性轮询，避免空耗 CPU
+                await asyncio.sleep(300)
+            except asyncio.CancelledError:
+                break
 
     def _extract_text_for_memory(self, content) -> str:
         """从多模态负载中剥离视觉数据，仅保留纯文本供长期记忆消化"""
@@ -274,7 +283,6 @@ class Hippocampus:
                 if item.get("type") == "text":
                     text_parts.append(item.get("text", ""))
                 elif item.get("type") == "image_url":
-                    # 替换为文本占位符，保持记忆的语境连贯性
                     text_parts.append("[视觉输入]")
             return "\n".join(text_parts)
         return str(content)
@@ -372,7 +380,7 @@ class Hippocampus:
 
                     raw_combined = "\n".join(raw_texts)
 
-                    # 拼装最终的高密度语义记忆（摘要作为向量检索目标，原文快照作为精准上下文载荷）
+                    # 拼装最终的高密度语义记忆
                     final_content = f"【话题归档: {t_name}】\n结论摘要: {t_summary}\n\n[折叠的原始快照]:\n{raw_combined}"
 
                     # 存入 Semantic
@@ -384,6 +392,8 @@ class Hippocampus:
                 logger.info(
                     f"🧠 [睡眠压缩] 用户 {uid}: 将 {len(content_list)} 条零散记忆压缩为了 {saved_count} 个话题归档块。")
 
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.error(f"睡眠压缩执行异常 (用户 {uid}): {e}", exc_info=True)
 
@@ -394,7 +404,7 @@ class Hippocampus:
         """
         try:
             async with self.database.get_connection() as conn:
-                # 1. 清理完全重复的边 (Subject-Predicate-Object 完全一致，只保留最新的一条)
+                # 1. 清理完全重复的边
                 cleanup_duplicates_sql = """
                                          DELETE \
                                          FROM graph_edges
@@ -406,7 +416,6 @@ class Hippocampus:
                 dup_deleted = cursor.rowcount
 
                 # 2. 衰减所有边的权重 (模拟记忆遗忘曲线)
-                # 每天衰减 5% 的权重
                 await conn.execute("UPDATE graph_edges SET weight = weight * 0.95")
 
                 # 3. 删除权重过低 (低于 0.1) 且时间超过 30 天的无效关系
@@ -425,39 +434,6 @@ class Hippocampus:
 
         except Exception as e:
             logger.error(f"图谱修剪失败: {e}", exc_info=True)
-
-    def _scan_delta(self) -> List[Dict]:
-        """扫描增量消息"""
-        new_msgs = []
-        current_history_ids = set()
-
-        # 遍历所有活跃的 Session 字典
-        for session_id, session_history in self.history_ref.items():
-            # 遍历每个 Session 的时间线
-            for msg in list(session_history):
-                msg_id = id(msg)
-                current_history_ids.add(msg_id)
-
-                if msg_id not in self.processed_ids:
-                    metadata = msg.get("metadata", {})
-                    if metadata.get("ephemeral", False):
-                        self.processed_ids.add(msg_id)
-                        continue
-
-                    if msg.get("role") in ["user", "assistant"]:
-                        # 将 session_id 注入增量，方便未来构建图谱时定位
-                        msg_copy = msg.copy()
-                        if "metadata" not in msg_copy:
-                            msg_copy["metadata"] = {}
-                        msg_copy["metadata"]["_source_session"] = session_id
-
-                        new_msgs.append(msg_copy)
-                        self.processed_ids.add(msg_id)
-                        self.last_active_time = time.time()
-
-        # 清理已不存在的消息ID (防止内存泄漏)
-        self.processed_ids.intersection_update(current_history_ids)
-        return new_msgs
 
     async def _consolidate_memory(self, buffer: List[Dict]):
         """
@@ -588,6 +564,8 @@ class Hippocampus:
             if memories:
                 logger.info(f"归档完成: 处理了 {len(memories)} 条记忆陈述")
 
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error(f"记忆转换与抽取失败: {e}", exc_info=True)
 
@@ -633,6 +611,8 @@ Agent 在使用工具 `{tool_name}` 时失败并触发了自愈机制。
             logger.info(f"🧠 [Hippocampus] 习得新经验: {rule}")
             return rule
 
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error(f"Failed to review tool mistake: {e}", exc_info=True)
             return None

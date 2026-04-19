@@ -12,14 +12,17 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_session_to_source(session_id: str) -> EventSource:
-    """反向解析引擎"""
-    # 切割格式：'group' 和 'onebot:12345'
-    ctx_type, puid = session_id.split('_', 1)
-    # 进一步切割出平台与纯数字 ID
-    plat, ctx_id = puid.split(':', 1)
+    """反向解析引擎 (已增加安全防爆校验)"""
+    try:
+        if "_" in session_id and ":" in session_id:
+            ctx_type, puid = session_id.split('_', 1)
+            plat, ctx_id = puid.split(':', 1)
 
-    if ctx_type in ["group", "private"]:
-        return EventSource(platform=plat, group_id=ctx_id)
+            if ctx_type in ["group", "private"]:
+                return EventSource(platform=plat, group_id=ctx_id)
+    except Exception as e:
+        logger.warning(f"⚠️ 工具链反向解析 session_id [{session_id}] 失败: {e}")
+
     return EventSource(platform="internal")
 
 
@@ -40,7 +43,7 @@ async def report_task_progress(
     # 提取订阅者矩阵
     subscribers = await global_task_registry.get_subscribers(task_id)
     if not subscribers:
-        subscribers = ["internal_default"]
+        subscribers = ["private_internal:daemon"]
 
     # 遍历拓扑散射
     for session_id in subscribers:
@@ -99,7 +102,7 @@ async def ask_system1_for_help(
 
     subscribers = await global_task_registry.get_subscribers(task_id)
     if not subscribers:
-        subscribers = ["internal_default"]
+        subscribers = ["private_internal:daemon"]
 
     for session_id in subscribers:
         source = _resolve_session_to_source(session_id)
@@ -121,8 +124,7 @@ async def ask_system1_for_help(
 async def conclude_task(
         result: str,
         status: str,
-        generate_skill: bool = False,
-        task_engine: TaskEngine = None
+        generate_skill: bool = False
 ) -> str:
     """
     当任务已经得出最终结论，或者确认彻底失败无法继续时，必须调用此工具来结束任务进程。
@@ -131,13 +133,5 @@ async def conclude_task(
     :param status: 任务最终定性状态，必须是 "success" 或 "failure"。
     :param generate_skill: 如果本次任务成功，并且你认为这次探索出了一套高价值、可复用的工作流或代码，将其设为 True，系统会在后台自动总结并固化为一个标准 Skill。
     """
-    task_engine.task_status = {
-        "finished": True,
-        "final_result": result,
-        "status": status,
-        "skill": generate_skill
-    }
-
-    logger.info(f"✅ [System 2] 任务主动宣布结束。结论: {result[:50]}...")
-
+    logger.info(f"✅ [System 2] 任务主动宣布结束。")
     return f"任务结束信号已发送。结论：{result}。是否触发技能演化：{generate_skill}。"

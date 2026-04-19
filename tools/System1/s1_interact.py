@@ -7,7 +7,7 @@ from typing import Optional
 from core.infrastructure.api_client import GenericAPIClient
 from core.io.event_bus import EventBus
 from core.io.event_schema import OneBotEvent, EventType, DetailType, TaskPayload, EventSource
-from core.kernel.task_registry import global_task_registry
+from core.kernel.agent import AutonomousAgent
 from core.tool_manager.registry import register
 
 
@@ -15,21 +15,19 @@ from core.tool_manager.registry import register
 async def dispatch_background_task(
         task_description: str,
         parameters: Optional[dict] = None,
+        agent: AutonomousAgent = None,
         event_bus: EventBus = None,
-        agent_state: Optional[dict] = None
 ) -> str:
     """
     当用户要求执行复杂任务（如：搜索网络、分析文件、写代码、查系统状态、多步推理等）时，调用此工具将任务派发给后台 System 2 处理。
     :param task_description: 任务的详细描述，例如 '搜索今天的新闻并总结' 或 '扫描本地端口'
     :param parameters: 任务所需的参数字典，如 {"url": "xxx"}，如果没有可传 {}
     """
-    if parameters is None:
-        parameters = {}
+    if parameters is None: parameters = {}
 
-    # 物理截获：无感锚定源发会话坐标
-    origin_session = agent_state.get("current_session_id") if agent_state else None
-    if origin_session:
-        parameters["origin_session"] = origin_session
+    # 锚定源发会话坐标
+    current_session = getattr(agent, "active_session_id", "system_default")
+    parameters["origin_session"] = current_session
 
     task_id = f"task_{int(time.time())}"
 

@@ -282,6 +282,11 @@ class TaskEngine:
                     description = task_info.get("description", "恢复的任务")
                     params = task_info.get("params", {})
                     source_dict = task_info.get("source", {})
+                    origin_session = params.get("origin_session")
+
+                    if origin_session:
+                        # 确保重启后，S1 依然能收到结果
+                        await global_task_registry.subscribe_session(task_id, origin_session)
 
                     # 3. 反序列化 EventSource
                     source = DummySource(source_dict) if source_dict else None
@@ -335,6 +340,11 @@ class TaskEngine:
             agent_state=local_scratchpad
         )
         local_tool_manager.add_dependency("task_engine", self)
+
+        # 从引擎外层提取并向沙盒注入全局依赖
+        if hasattr(self, "daemon_manager"):
+            local_tool_manager.add_dependency("daemon_manager", self.daemon_manager)
+
         await local_tool_manager.initialize()
 
         safe_task_id = str(task_id).replace(":", "_").replace("-", "")
@@ -513,7 +523,7 @@ class TaskEngine:
                                            is_stable=has_valid_scratchpad)
 
                 # ==========================================
-                # 任务结束条件检测机制 (双重保险)
+                # 任务结束条件检测机制
                 # ==========================================
                 is_concluded = False
 
@@ -527,13 +537,14 @@ class TaskEngine:
                                 args_data = task_op["arguments"]
                                 args_dict = json.loads(args_data) if isinstance(args_data, str) else args_data
 
-                                task_status_tracker["status"] = args_dict.get("status", "completed")
-                                task_status_tracker["final_result"] = args_dict.get("summary",
-                                                                                    "任务通过工具完结，但未提供总结。")
+                                task_status_tracker["status"] = args_dict.get("status", "success")
+                                task_status_tracker["final_result"] = args_dict.get("result", "任务通过工具完结，但未提供总结。")
+                                task_status_tracker["skill"] = args_dict.get("generate_skill", False)
                             except Exception as e:
                                 logger.warning(f"⚠️ [Sandbox:{task_id}] 解析 conclude_task 参数失败: {e}")
-                                task_status_tracker["status"] = "completed"
+                                task_status_tracker["status"] = "success"
                                 task_status_tracker["final_result"] = "任务完结 (参数提取降级)。"
+                                task_status_tracker["skill"] = False
 
                             task_status_tracker["finished"] = True
                             break  # 只要调用了完结工具，立刻停止遍历后续工具
@@ -541,14 +552,13 @@ class TaskEngine:
                 # 2. 认知兜底：如果模型未调用工具，但暂存板状态已变更为终态，且没有挂起其他工具
                 if not is_concluded and not tool_queue:
                     current_status = local_scratchpad.get("task_status", "normal")
-                    if current_status in ["completed", "failed"]:
-                        logger.warning(
-                            f"⚠️ [Sandbox:{task_id}] 模型未调用 conclude_task，但暂存板已标记为 {current_status}，触发兜底退出。")
+                    if current_status == "completed":
+                        logger.warning(f"⚠️ [Sandbox:{task_id}] 模型未调用 conclude_task，但暂存板已标记为 {current_status}，触发兜底退出。")
                         is_concluded = True
                         task_status_tracker["finished"] = True
-                        task_status_tracker["status"] = current_status
-                        task_status_tracker["final_result"] = local_scratchpad.get("progress_summary",
-                                                                                   f"触发 {current_status} 兜底完结。")
+                        task_status_tracker["status"] = "success"
+                        task_status_tracker["final_result"] = local_scratchpad.get("progress_summary", f"触发 {current_status} 兜底完结。")
+                        task_status_tracker["skill"] = False
 
                 # 如果命中任一完结条件，打破沙盒主循环
                 if is_concluded:
@@ -728,27 +738,35 @@ class TaskEngine:
         return "\n".join(context)
 
     async def _broadcast_task_event(self, task_id: str, detail_type: str, result: str, status: str, description: str):
-        """多路原子事件广播不变，但路由完全依托 task_id 取值"""
+        """多路原子事件广播"""
         subscribers = await global_task_registry.get_subscribers(task_id)
         if not subscribers:
-            subscribers = ["internal_default"]
+            subscribers = ["private_internal:daemon"]
 
         for index, session_id in enumerate(subscribers):
             if index > 0: await asyncio.sleep(random.uniform(0.1, 1.0))
 
             # 动态坐标解析
             target_source = EventSource(platform="internal")
-            # 切割格式：'group' 和 'onebot:12345'
-            ctx_type, puid = session_id.split('_', 1)
-            # 进一步切割出平台与纯数字 ID
-            plat, ctx_id = puid.split(':', 1)
 
-            target_source.platform = plat
-            if ctx_type == "group":
-                target_source.group_id = ctx_id
-            elif ctx_type == "private":
-                target_source.user_id = ctx_id
+            try:
+                # 严格校验并解析 session_id (例如: private_onebot:12345)
+                if "_" in session_id and ":" in session_id:
+                    ctx_type, puid = session_id.split('_', 1)
+                    plat, ctx_id = puid.split(':', 1)
 
+                    target_source.platform = plat
+                    if ctx_type == "group":
+                        target_source.group_id = ctx_id
+                    else:
+                        target_source.user_id = ctx_id
+                else:
+                    # 格式不符时的降级处理
+                    target_source.user_id = session_id
+            except Exception as e:
+                logger.warning(f"⚠️ 解析订阅者 session_id [{session_id}] 失败: {e}")
+
+            # 推送事件
             self.event_bus.publish_event(OneBotEvent(
                 type=EventType.TASK, detail_type=detail_type, source=target_source,
                 extra={"task_payload": {"task_id": task_id, "result": result, "status": status,

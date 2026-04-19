@@ -60,7 +60,55 @@ class ToolManager:
         self.dependency_map[name] = dependency
 
     async def initialize(self):
-        """初始化：加载本地工具 + 连接 MCP"""
+        """
+        初始化工具管理器，动态扫描并挂载工具模块。
+        """
+        # 从路径中提取系统标识 (例如 "System1" 或 "System2")
+        system_name = os.path.basename(os.path.normpath(self.tools_dir))
+        config_changed = False
+
+        if not os.path.exists(self.tools_dir):
+            logger.warning(f"工具目录不存在: {self.tools_dir}")
+            return
+
+        for root, _, files in os.walk(self.tools_dir):
+            for file in files:
+                if file.endswith(".py") and not file.startswith("__"):
+                    module_name = file[:-3] # 去除 .py 后缀
+
+                    # 1. 构造配置键名 (例如: tools.System1.core_tool)
+                    config_key = f"tools.{system_name}.{module_name}"
+
+                    # 2. 读取配置
+                    is_enabled = self.config.get(config_key)
+
+                    # 3. 如果配置中不存在该文件开关，则自动生成并默认开启
+                    if is_enabled is None:
+                        self.config.set(config_key, True)
+                        is_enabled = True
+                        config_changed = True
+                        logger.info(f"✨ 发现新工具文件 [{system_name}/{module_name}]，已自动在配置中注册并默认启用。")
+
+                    # 4. 拦截判定
+                    if not is_enabled:
+                        logger.info(f"🚫 工具文件 [{system_name}/{module_name}] 已在配置中被禁用，跳过加载。")
+                        continue
+
+                    # 5. 允许加载：拼接完整的模块导入路径
+                    # 假设 self.tools_dir 是 "tools/System1"
+                    rel_path = os.path.relpath(root, start=os.getcwd())
+                    module_path = rel_path.replace(os.sep, '.') + f".{module_name}"
+
+                    try:
+                        importlib.import_module(module_path)
+                        logger.debug(f"成功加载工具模块: {module_path}")
+                    except Exception as e:
+                        logger.error(f"加载工具模块 {module_path} 失败: {e}", exc_info=True)
+
+        # 6. 如果在扫描期间发现了新文件并补充了配置，触发物理落盘
+        if config_changed:
+            self.config.save()
+
         # 1. 加载本地工具
         self._load_local_tools()
 
@@ -86,19 +134,57 @@ class ToolManager:
         if not os.path.exists(self.tools_dir):
             os.makedirs(self.tools_dir)
 
+        system_name = os.path.basename(os.path.normpath(self.tools_dir))
+        config_changed = False
+
         for filename in os.listdir(self.tools_dir):
             if filename.endswith(".py") and not filename.startswith("_"):
-                module_name = f"{self.tools_dir.replace('/', '.')}.{filename[:-3]}"
+                module_short_name = filename[:-3]
+                config_key = f"tools.{system_name}.{module_short_name}"
+
+                # 1. 检查配置，如果不存在则自动生成并默认开启
+                is_enabled = self.config.get(config_key)
+                if is_enabled is None:
+                    self.config.set(config_key, True)
+                    is_enabled = True
+                    config_changed = True
+                    logger.info(f"✨ 发现新工具文件 [{system_name}/{module_short_name}]，已自动注册并默认启用。")
+
+                # 2. 如果配置为 false，直接阻断物理导入
+                if not is_enabled:
+                    logger.info(f"🚫 工具文件 [{system_name}/{module_short_name}] 已被禁用，跳过主动加载。")
+                    continue
+
+                # 3. 允许加载
+                module_name = f"{self.tools_dir.replace('/', '.')}.{module_short_name}"
                 try:
                     importlib.import_module(module_name)
                     logger.debug(f"已导入工具: {module_name}")
                 except Exception as e:
                     logger.error(f"工具组件 {module_name} 导入失败: {e}", exc_info=True)
 
+        # 如果在此次扫描中发现了新文件，触发配置落盘保存
+        if config_changed:
+            self.config.save()
+
         # 获取所有通过 @register 注册的函数
         pending = get_pending_functions()
+
         for func, name in pending:
             tool_name = name or func.__name__
+
+            module_path = getattr(func, "__module__", "")
+            if module_path.startswith("tools."):
+                parts = module_path.split('.')
+                if len(parts) >= 3:
+                    sys_name = parts[1]
+                    file_name = parts[2]
+                    config_key = f"tools.{sys_name}.{file_name}"
+
+                    # 检查其原产地文件是否在配置中被明确禁用
+                    if self.config.get(config_key) is False:
+                        logger.info(f"🛡️ 深度拦截: 剔除被动连带导入的禁用工具 [{tool_name}] (源自 {file_name}.py)")
+                        continue
 
             # 生成 Schema (跳过依赖注入参数)
             schema = SchemaGenerator.get_function_schema(func, tool_name)

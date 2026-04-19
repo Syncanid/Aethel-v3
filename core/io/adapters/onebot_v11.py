@@ -74,6 +74,9 @@ class OneBotV11Adapter(BaseAdapter):
                     async for message in ws:
                         await self._handle_raw_message(message)
 
+            except asyncio.CancelledError:
+                logger.info("🛑 OneBot 适配器接收到退出信号。")
+                break
             except (websockets.ConnectionClosed, ConnectionRefusedError) as e:
                 logger.warning(f"OneBot 连接断开或失败 ({e})，5秒后重试...")
                 self.websocket = None
@@ -83,10 +86,18 @@ class OneBotV11Adapter(BaseAdapter):
                         future.cancel()
                 self._pending_requests.clear()
 
-                await asyncio.sleep(5)
+                try:
+                    await asyncio.sleep(5)
+                except asyncio.CancelledError:
+                    break
             except Exception as e:
+                if "Event loop is closed" in str(e):
+                    break
                 logger.error(f"OneBot 适配器发生未捕获异常: {e}", exc_info=True)
-                await asyncio.sleep(5)
+                try:
+                    await asyncio.sleep(5)
+                except asyncio.CancelledError:
+                    break
 
     async def _handle_raw_message(self, raw_msg: str):
         """分发处理 WS 消息"""

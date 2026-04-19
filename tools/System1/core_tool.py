@@ -155,7 +155,10 @@ async def send_message(
     if not agent:
         return "错误: 无法获取系统 Agent 上下文。"
 
-    last_context = agent.scratchpad.get("last_context", {})
+    session_id = getattr(agent, "active_session_id", "system_default")
+    current_scratchpad = agent.session_scratchpads.get(session_id, {})
+    last_context = current_scratchpad.get("last_context", {})
+
     platform = last_context.get("platform")
     target_type = last_context.get("type")
     target_id = last_context.get("id")
@@ -174,24 +177,18 @@ async def create_session(
         platform: str,
         target_id: str,
         target_type: Literal["private", "group"],
-        initial_message: str,
-        wait_minutes: Optional[float] = None,
-        event_bus: EventBus = None,
+        mission: str,
         agent: AutonomousAgent = None,
-        scheduler: AsyncIOScheduler = None,
-        fragmenter: Any = None,
 ) -> str:
     """
-    从 0 创建一个全新的会话空间，并主动发出第一条破冰消息。
-    适用场景：当你突然想主动找某个人私聊，或者在内部冲动的驱使下想主动往某个群里发消息时使用。
-    调用此工具后，你的主意识焦点将自动切换至这个新会话中。
+    从 0 创建一个全新的会话空间，建立与目标人物/群组的连接通道。
+    成功调用后，你的主意识焦点将自动切换至这个新会话中。你需要在下一次思考时，根据你的 `mission` (目的) 决定你的下一步行动。
 
     Args:
         platform: 目标平台（通常为 "onebot"）。
         target_id: 目标的 user_id 或 group_id。
         target_type: "private" 或 "group"。
-        initial_message: 第一条发出的破冰消息内容。
-        wait_minutes: (可选) 发送后等待的分钟数。
+        mission: 你建立这个会话的核心目的（例如："打招呼并告知系统已启动"）。这将被写入会话的初始记忆中，指引你接下来的行动。
     """
     if not agent:
         return "错误: 无法获取系统 Agent 上下文。"
@@ -200,22 +197,28 @@ async def create_session(
     session_id = f"{target_type}_{platform}:{target_id}"
 
     agent.active_session_id = session_id
-    agent.scratchpad["last_context"] = {
+
+    # 兼容虚拟化会话状态隔离：初始化并写入对应的 Session 空间
+    if session_id not in agent.session_scratchpads:
+        agent.session_scratchpads[session_id] = {"current_interactor": {}, "last_context": {}}
+
+    agent.session_scratchpads[session_id]["last_context"] = {
         "platform": platform,
         "type": target_type,
         "id": target_id
     }
 
-    # 2. 如果内存中不存在该会话，直接初始化（保证 Prompt 系统能够顺利载入）
+    # 2. 如果内存中不存在该会话，直接初始化
     if session_id not in agent.working_memory:
-        agent.working_memory[session_id] = [{"role": "system", "content": "INITIALIZING NEW SESSION..."}]
-        logger.info(f"🆕 [create_session] 已强制建立并劫持焦点至全新认知会话: {session_id}")
+        agent.working_memory[session_id] = [
+            {"role": "system", "content": "INITIALIZING NEW SESSION..."},
+            {"role": "user",
+             "content": f"【系统流转】你刚刚主动跨越维度，开启了与该目标 [{target_id}] 的连接通道。\n你来到这里的核心任务/目的是：{mission}\n请立刻评估环境，并在下一次行动中执行你的目的。"}
+        ]
+        logger.info(f"🆕 [create_session] 已强制建立并劫持焦点至全新认知会话: {session_id}，目的: {mission}")
 
-    # 3. 直接顺流发出第一条消息
-    return await _execute_send_message(
-        initial_message, platform, target_id, target_type, wait_minutes,
-        event_bus, agent, scheduler, fragmenter
-    )
+    # 3. 仅返回物理连通状态，把说话的权力交还给模型的主循环
+    return f"通道建立成功！你的意识已投射至 [{session_id}]。请立刻在接下来的心流中根据你的目的 ({mission}) 展开行动。"
 
 
 @register()
