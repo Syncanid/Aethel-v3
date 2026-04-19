@@ -265,7 +265,7 @@ class VectorStore:
             # 降级方案：保留现有的正则逻辑作为兜底
             return re.findall(r'[a-zA-Z0-9_]+|[\u4e00-\u9fa5]{2,}', query)
 
-    async def search_graph_edges(self, query: str, user_id: str, limit: int = 5) -> List[Dict]:
+    async def search_graph_edges(self, query: str, user_id: str = None, limit: int = 5) -> List[Dict]:
         """
         2-Hop 知识图谱子图检索引擎 (GraphRAG)
         提取实体 -> 命中种子节点 (Hop 1) -> 扩展邻居节点 (Hop 2) -> 距离衰减打分
@@ -283,9 +283,15 @@ class VectorStore:
             hop1_edges = {}
             seed_entities = set()
 
-            # 动态构造 LIKE 条件
+            # 动态构造 LIKE 条件与参数
             conditions = []
-            params_hop1 = [user_id]
+            params_hop1 = []
+            if user_id:
+                params_hop1.append(user_id)
+                base_where = "puid = ? AND "
+            else:
+                base_where = ""
+
             for kw in keywords:
                 conditions.append("(source LIKE ? OR target LIKE ?)")
                 params_hop1.extend([f"%{kw}%", f"%{kw}%"])
@@ -294,7 +300,7 @@ class VectorStore:
             sql_hop1 = f"""
                 SELECT id, source, target, relation, context, weight 
                 FROM graph_edges 
-                WHERE puid = ? AND ({where_clause})
+                WHERE {base_where}({where_clause})
                 ORDER BY weight DESC LIMIT ?
             """
             params_hop1.append(limit)  # 追加 LIMIT 参数
@@ -320,11 +326,17 @@ class VectorStore:
             hop2_edges = {}
             if seed_entities:
                 for seed in seed_entities:
-                    # 查询该实体的“节点度数”（有多少条边连着它）
-                    cursor = await conn.execute(
-                        "SELECT COUNT(*) FROM graph_edges WHERE puid=? AND (source=? OR target=?)",
-                        (user_id, seed, seed)
-                    )
+                    # 查询该实体的“节点度数”
+                    if user_id:
+                        cursor = await conn.execute(
+                            "SELECT COUNT(*) FROM graph_edges WHERE puid=? AND (source=? OR target=?)",
+                            (user_id, seed, seed)
+                        )
+                    else:
+                        cursor = await conn.execute(
+                            "SELECT COUNT(*) FROM graph_edges WHERE source=? OR target=?",
+                            (seed, seed)
+                        )
                     degree = (await cursor.fetchone())[0]
 
                     # 动态衰减：如果一个节点连着上百条边，说明它是废话节点（比如"我"），惩罚它
@@ -333,14 +345,24 @@ class VectorStore:
                     # 如果惩罚太高，直接抛弃，防止爆炸
                     if decay_factor < 0.05: continue
 
-                    sql_hop2 = """
-                               SELECT id, source, target, relation, context, weight
-                               FROM graph_edges
-                               WHERE puid = ?
-                                 AND (source = ? OR target = ?)
-                               ORDER BY weight DESC LIMIT ? \
-                               """
-                    cursor = await conn.execute(sql_hop2, (user_id, seed, seed, 5))
+                    if user_id:
+                        sql_hop2 = """
+                                   SELECT id, source, target, relation, context, weight
+                                   FROM graph_edges
+                                   WHERE puid = ?
+                                     AND (source = ? OR target = ?)
+                                   ORDER BY weight DESC LIMIT ? \
+                                   """
+                        cursor = await conn.execute(sql_hop2, (user_id, seed, seed, 5))
+                    else:
+                        sql_hop2 = """
+                                   SELECT id, source, target, relation, context, weight
+                                   FROM graph_edges
+                                   WHERE (source = ? OR target = ?)
+                                   ORDER BY weight DESC LIMIT ? \
+                                   """
+                        cursor = await conn.execute(sql_hop2, (seed, seed, 5))
+
                     rows2 = await cursor.fetchall()
 
                     for r in rows2:
@@ -379,8 +401,7 @@ class VectorStore:
 
         return graph_results
 
-    async def search_memory(self, query: str, user_id: str, current_state: NeuroState = None, limit: int = 5) -> List[
-        str]:
+    async def search_memory(self, query: str, user_id: str = None, current_state: NeuroState = None, limit: int = 5) -> List[str]:
         """
         情绪依存的混合检索: Vector + FTS5 + Graph -> RRF -> Emotion Rerank
         """
@@ -388,8 +409,11 @@ class VectorStore:
         vector_results = []
         query_vec = await self.api_client.create_embedding(query)
         if query_vec:
+            # user_id 为 None 时忽略 user_id 过滤条件
+            where_cond = {"user_id": user_id} if user_id else None
+
             for coll in [self.episodic_coll, self.semantic_coll]:
-                res = coll.query(query_embeddings=[query_vec], n_results=limit * 2, where={"user_id": user_id})
+                res = coll.query(query_embeddings=[query_vec], n_results=limit * 2, where=where_cond)
                 if res['ids']:
                     for i, doc_id in enumerate(res['ids'][0]):
                         vector_results.append({
@@ -402,17 +426,26 @@ class VectorStore:
         # 路二：全文检索 (SQLite FTS5 BM25 - 擅长精准关键词匹配)
         text_results = []
         async with self.db.get_connection() as conn:
-            sql = """
-                  SELECT doc_id, content, type
-                  FROM memory_fts
-                  WHERE memory_fts MATCH ?
-                    AND puid = ?
-                  ORDER BY bm25(memory_fts) LIMIT ? \
-                  """
             try:
-                # FTS5 的 MATCH 语法需要处理特殊字符，这里做简单转义
                 safe_query = query.replace('"', '""').replace("'", "''")
-                cursor = await conn.execute(sql, (f'"{safe_query}"', user_id, limit * 2))
+                if user_id:
+                    sql = """
+                          SELECT doc_id, content, type
+                          FROM memory_fts
+                          WHERE memory_fts MATCH ?
+                            AND puid = ?
+                          ORDER BY bm25(memory_fts) LIMIT ? \
+                          """
+                    cursor = await conn.execute(sql, (f'"{safe_query}"', user_id, limit * 2))
+                else:
+                    sql = """
+                          SELECT doc_id, content, type
+                          FROM memory_fts
+                          WHERE memory_fts MATCH ?
+                          ORDER BY bm25(memory_fts) LIMIT ? \
+                          """
+                    cursor = await conn.execute(sql, (f'"{safe_query}"', limit * 2))
+
                 rows = await cursor.fetchall()
                 for r in rows:
                     text_results.append({
@@ -452,11 +485,12 @@ class VectorStore:
         # 格式化输出
         final_output = []
 
-        # 优先添加 Core Memory (置顶)
-        core_mems = await self.db.get_core_memory(user_id)
-        for k, v in core_mems.items():
-            if query in k or query in v:
-                final_output.append(f"[核心档案] {k}: {v}")
+        # 优先添加 Core Memory (核心档案一般挂钩具体用户，如果查询全局则忽略)
+        if user_id:
+            core_mems = await self.db.get_core_memory(user_id)
+            for k, v in core_mems.items():
+                if query in k or query in v:
+                    final_output.append(f"[核心档案] {k}: {v}")
 
         for item in merged_results[:limit]:
             if str(item.get("id")).startswith("graph_"):

@@ -40,19 +40,18 @@ class AutonomousAgent:
         self.api_client = GenericAPIClient(config)
         self.prompt_manager = PromptManager(config)
 
-        # --- 内部状态 ---
+        # --- Session Virtualization 状态池 ---
         self.working_memory: Dict[str, List[Dict[str, Any]]] = {}
         self.session_last_active: Dict[str, float] = {}
         self.session_willingness: Dict[str, float] = {}
+        self.session_scratchpads: Dict[str, Dict[str, Any]] = {}
+        self.session_last_responses: Dict[str, str] = {}
+        self.session_last_observations: Dict[str, str] = {}
+        self.session_next_use_tools: Dict[str, bool] = {}
+
         self.global_blackboard: Dict[str, Dict[str, Any]] = {}
         self.active_session_id: str = "system_default"
-        self.scratchpad: Dict[str, Any] = {
-            "current_interactor": {},
-            "last_context": {}
-        }
-        self.last_response_content = ""  # 用于死锁检测
-        self.next_response_use_tools = False
-        self.last_observation_text = ""  # 初始化最后一次观察到的文本
+        self.force_sleep = False
 
         # 初始化注意力门控系统
         self.attention = AttentionFilter(
@@ -61,10 +60,6 @@ class AutonomousAgent:
             api_client=self.api_client,
             database=database
         )
-        self.session_willingness: Dict[str, float] = {}
-
-        # --- 强制休眠标记 ---
-        self.force_sleep = False
 
         # --- 初始化工具管理器 ---
         self.tool_manager = ToolManager(
@@ -73,7 +68,7 @@ class AutonomousAgent:
             event_bus=event_bus,
             api_client=self.api_client,
             database=database,
-            agent_state=self.scratchpad
+            agent_state={}
         )
 
         # 初始化边缘系统
@@ -143,7 +138,6 @@ class AutonomousAgent:
     async def _mw_enrich_context(self, event: OneBotEvent, next_call: Callable[[], Awaitable[None]]):
         """
         [中间件] 社交上下文富化
-        识别用户身份，读取档案，并注入到 Scratchpad 中。
         """
         # 自动捕获用户
         adapters = self.tool_manager.dependency_map.get("adapters", [])
@@ -156,7 +150,9 @@ class AutonomousAgent:
             # 更新上下文位置
             ctx_type = "group" if event.source.group_id else "private"
             ctx_id = event.source.group_id if event.source.group_id else raw_id
-            self.scratchpad["last_context"] = {
+
+            # 隔离写入：附着在事件体上，而非写脏全局属性
+            event.extra["parsed_context"] = {
                 "platform": platform,
                 "type": ctx_type,
                 "id": ctx_id
@@ -183,8 +179,7 @@ class AutonomousAgent:
 
                 # 仅推送到 UI 监控面板（Dashboard）
                 monitor_registry.register_text_source(
-                    "系统", "S2 后台进度",
-                    lambda m=msg, tid=task_id: f"Task [{tid}]: {m}"
+                    "系统", "S2 后台进度", lambda m=msg, tid=task_id: f"Task [{tid}]: {m}"
                 )
                 return
 
@@ -196,14 +191,25 @@ class AutonomousAgent:
             await next_call()
             return
 
+        # 计算 Session ID
+        ctx_type = "group" if event.source.group_id else "private"
+        platform_name = getattr(event.source, "platform", "unknown")
+        ctx_id = event.source.group_id if event.source.group_id else event.source.user_id
+        session_id = f"{ctx_type}_{platform_name}:{ctx_id}"
+
+        if event.detail_type == DetailType.CROSS_SESSION_DIRECTIVE:
+            session_id = event.extra.get("target_session_id", "system_default")
+            logger.warning(f"🛸 [维度跳跃] 捕获到跨区指令，强制将焦点切换至: {session_id}")
+
+        self.active_session_id = session_id
+
         # 1. 边缘系统“感受”刺激
         if event.type == EventType.MESSAGE and isinstance(event.message, str):
             asyncio.create_task(self.limbic.process_stimulus(event.message))
-            self.last_observation_text = event.message
+            self.session_last_observations[session_id] = event.message
 
         # 2. 决定消息内容
         if event.type == EventType.MESSAGE:
-            # 序列化清理
             event_data = event.model_dump(exclude_none=True)
             for field in ["id", "time", "raw_data", "message", "alt_message"]:
                 if field in event_data: del event_data[field]
@@ -221,9 +227,7 @@ class AutonomousAgent:
                     if b64_data_uri:
                         content_payload.append({
                             "type": "image_url",
-                            "image_url": {
-                                "url": b64_data_uri
-                            }
+                            "image_url": {"url": b64_data_uri}
                         })
                     else:
                         # 如果转码失败（如文件被删/网络超时），注入系统的容错提示，防止认知割裂
@@ -239,26 +243,6 @@ class AutonomousAgent:
         else:
             content_payload = self._transcribe_event(event)
             is_ephemeral = True
-
-        ctx_type = "group" if event.source.group_id else "private"
-        platform_name = getattr(event.source, "platform", "unknown")
-        ctx_id = event.source.group_id if event.source.group_id else event.source.user_id
-        session_id = f"{ctx_type}_{platform_name}:{ctx_id}"
-        self.active_session_id = session_id
-
-        if event.detail_type == DetailType.CROSS_SESSION_DIRECTIVE:
-            # 【特权拦截】：如果是跨区指令，直接劫持焦点，不使用源平台的 ID
-            session_id = event.extra.get("target_session_id", "system_default")
-            logger.warning(f"🛸 [维度跳跃] 捕获到跨区指令，强制将焦点切换至: {session_id}")
-        else:
-            # 【常规路由】：从外部来源计算 Session ID
-            platform_name = getattr(event.source, "platform", "unknown")
-            ctx_type = "group" if event.source.group_id else "private"
-            ctx_id = event.source.group_id if event.source.group_id else event.source.user_id
-            session_id = f"{ctx_type}_{platform_name}:{ctx_id}"
-
-        # 强制将系统的核心注意力焦点切换到当前事件的发生地
-        self.active_session_id = session_id
 
         # 3. 写入历史
         history_item = {
@@ -316,44 +300,36 @@ class AutonomousAgent:
             await next_call()
             return
 
-        # 1. 锚定当前焦点 Session (由 _mw_transcribe_and_log 注入)
         session_id = getattr(self, "active_session_id", "system_default")
         active_history = self.working_memory.get(session_id, [])
 
-        # 提取由 LLM 意志主导的当前会话意愿值 (默认 0.5)
         current_will = self.session_willingness.get(session_id, 0.5)
-
-        # 2. 提取局部会话历史
-        # 注意：排除最后一条当前事件，只取之前的作为 Context
         recent_history = active_history[:-1][-5:] if len(active_history) > 1 else []
 
-        # 3. 高维门控评估
-        reaction = await self.attention.evaluate(
-            event,
+        reaction = await self.attention.evaluate(event,
             recent_history=recent_history,
             willingness=current_will
         )
 
         self._current_reaction = reaction
 
-        # 4. 决策分流
+        # 从 Session 隔离池中安全读取当前意图
+        current_goal = self.session_scratchpads.get(session_id, {}).get("current_goal")
+
         if reaction == ReactionType.IGNORE:
             logger.info(f"🗑️ [Observer] 决定无视: {event.id}")
-            current_goal = self.scratchpad.get("current_goal")
             if not current_goal:
                 self.force_sleep = True
             self._should_think_after_event = False
 
         elif reaction == ReactionType.OBSERVE:
             logger.info(f"🤐 [Observer] 决定保持沉默 (仅观察): {event.id}")
-            current_goal = self.scratchpad.get("current_goal")
             if not current_goal:
                 self.force_sleep = True
             self._should_think_after_event = False
 
-        elif reaction.value == "silent_observe":  # 兼容处理，对应新增的 ReactionType.SILENT_OBSERVE
+        elif reaction.value == "silent_observe":
             logger.info(f"😒 [Observer] 决定不理会 (积极静默，将产生内心独白): {event.id}")
-            # 注意这里是 True！我们要让 LLM 醒来写日记
             self._should_think_after_event = True
             if self.wakeup_job_id:
                 try:
@@ -438,17 +414,19 @@ class AutonomousAgent:
         return current_estimated_tokens
 
     async def save_state(self):
-        """统一持久化 S1 的完整运行状态 (涵盖上下文历史、变量与生理状态)"""
+        """统一持久化 S1 的完整运行状态"""
         try:
             state = {
                 "working_memory": self.working_memory,
                 "session_last_active": self.session_last_active,
                 "session_willingness": self.session_willingness,
-                "scratchpad": self.scratchpad,
+                "session_scratchpads": self.session_scratchpads,
                 "global_blackboard": self.global_blackboard,
                 "is_sleeping": self.is_sleeping,
                 "force_sleep": self.force_sleep,
-                "last_response_content": self.last_response_content,
+                "session_last_responses": self.session_last_responses,
+                "session_last_observations": self.session_last_observations,
+                "session_next_use_tools": self.session_next_use_tools,
                 "timestamp": time.time()
             }
             json_str = json.dumps(state, ensure_ascii=False)
@@ -476,10 +454,13 @@ class AutonomousAgent:
                     self.working_memory = state.get("working_memory", {})
                     self.session_last_active = state.get("session_last_active", {})
                     self.session_willingness = state.get("session_willingness", {})
-                    self.scratchpad.update(state.get("scratchpad", {}))
+                    self.session_scratchpads = state.get("session_scratchpads", {})
+                    self.session_last_responses = state.get("session_last_responses", {})
+                    self.session_last_observations = state.get("session_last_observations", {})
+                    self.session_next_use_tools = state.get("session_next_use_tools", {})
+
                     self.is_sleeping = state.get("is_sleeping", False)
                     self.force_sleep = state.get("force_sleep", False)
-                    self.last_response_content = state.get("last_response_content", "")
 
                     loaded_blackboard = state.get("global_blackboard", {})
                     current_time = time.time()
@@ -506,35 +487,28 @@ class AutonomousAgent:
         """
         logger.info("Agent 核心循环已启动...")
 
-        # 启动调度器
         self.scheduler.start()
         logger.info("任务调度器已启动")
 
-        # 初始化 Social DB
         logger.info("正在加载社交系统...")
         await self.user_manager.initialize()
 
-        # 异步加载工具 (包括 MCP)
         logger.info("正在加载工具组件...")
         await self.tool_manager.initialize()
 
-        # 初始化边缘系统数据库
         logger.info("正在加载边缘系统...")
         await self.limbic.initialize()
 
         # 1. 注入初始系统上下文
-        # 获取当前兴趣
         logger.info("正在加载兴趣...")
         initial_interest = await self.attention.get_current_interest_text()
 
-        # 获取初始生理状态
         logger.info("正在加载生理状态...")
         initial_state = await self.limbic.get_state()
 
         logger.info("正在加载躯体感知...")
         embodiment_narrative = self.limbic.embodiment.get_status_narrative()
 
-        # 生成完整 Prompt
         logger.info("正在生成Prompt...")
         system_prompt = self.prompt_manager.get_system_prompt(
             neuro_state=initial_state,
@@ -632,7 +606,6 @@ class AutonomousAgent:
                     except asyncio.TimeoutError:
                         pass
 
-                # 通过中间件管道处理事件
                 self._should_think_after_event = False
                 if event:
                     await self.middleware.process_event(event, self._final_event_handler)
@@ -647,20 +620,34 @@ class AutonomousAgent:
                 await self.save_state()
 
                 # --- B. 思考与决策阶段 (Thought) ---
-
-                # 1. 锚定当前工作区与历史记录
                 current_session = getattr(self, "active_session_id", "system_default")
+
+                # 建立并获取 Session 独占工作区与状态板
                 if current_session not in self.working_memory:
                     self.working_memory[current_session] = [{"role": "system", "content": "INITIALIZING..."}]
                 active_history = self.working_memory[current_session]
 
-                # 2. 修剪上下文
+                if current_session not in self.session_scratchpads:
+                    self.session_scratchpads[current_session] = {
+                        "current_interactor": {},
+                        "last_context": {}
+                    }
+                current_scratchpad = self.session_scratchpads[current_session]
+
+                # 将中间件提纯的数据安全注入当前会话空间
+                if event and "parsed_context" in event.extra:
+                    current_scratchpad["last_context"] = event.extra["parsed_context"]
+
+                # 将底层调用引擎动态挂载至当前隔离会话
+                self.tool_manager.agent_state = current_scratchpad
+
+                # 修剪上下文
                 await self.context_manager.compress_if_needed(active_history)
                 self.current_tokens = self._prune_context(current_session)
                 self.limbic.embodiment.context_usage_percent = (
                         self.current_tokens / self.config.get("llm.model_context", 16384))
 
-                # 3. 检索房间内的最近参与者 (Room Awareness)
+                # 检索房间内的最近参与者
                 recent_participants = []
                 if current_session.startswith("group_"):
                     seen_puids = set()
@@ -675,8 +662,8 @@ class AutonomousAgent:
                         if len(seen_puids) >= 5:
                             break
 
-                # 4. 提取当前主目标 (Current Target) 与群环境
-                active_puid = self.scratchpad.get("active_puid")
+                # 提取当前主目标与群环境
+                active_puid = current_scratchpad.get("active_puid")
                 target_profile = await self.user_manager.get_user(active_puid) if active_puid else None
 
                 # L1.5 跨会话瞬时记忆捕获
@@ -689,7 +676,7 @@ class AutonomousAgent:
                     if group_profile:
                         group_familiarity = group_profile.familiarity
 
-                # 5. 构造【公共面具】：环境行为边界
+                # 构造【公共面具】：环境行为边界
                 env_boundary = "\n\n<Environmental_Boundary>\n"
                 if is_group:
                     env_boundary += f"【当前环境】：群聊公共空间 (环境熟悉度: {group_familiarity}/100)\n"
@@ -707,7 +694,7 @@ class AutonomousAgent:
                     )
                 env_boundary += "\n</Environmental_Boundary>"
 
-                # 6. 构造【情感内核】：靶向关系潜台词
+                # 构造【情感内核】：靶向关系潜台词
                 relational_subtext = "\n<Relational_Subtext>\n"
 
                 # A. 注入当前目标
@@ -754,9 +741,9 @@ class AutonomousAgent:
 
                 relational_subtext += "</Relational_Subtext>\n"
 
-                # --- 核心新增：L1.2 全局热点黑板嗅探 (读空气机制) ---
+                # L1.2 全局热点黑板嗅探
                 blackboard_echo = ""
-                last_obs = getattr(self, "last_observation_text", "")
+                last_obs = self.session_last_observations.get(current_session, "")
 
                 # 仅当用户发了有实质意义的话，且黑板上有数据时进行碰撞测试
                 if active_puid and last_obs and len(last_obs) > 2:
@@ -784,11 +771,11 @@ class AutonomousAgent:
                                 )
                             break  # 撞中一个最相关的就够了
 
-                # 7. 主动记忆检索
-                # 注: 这里获取的是全局知识与跨群记忆，作为事实依据注入
-                retrieved_memories = await self._active_retrieval()
+                # 动态穿透获取当前会话目标
+                retrieved_memories = await self._active_retrieval(
+                    active_puid, last_obs, current_scratchpad.get("current_goal", ""))
 
-                # 8. 组装最终 System Prompt
+                # 组装最终 System Prompt
                 system_prompt_base = self.prompt_manager.get_system_prompt(
                     memory_context=retrieved_memories,
                     neuro_state=await self.limbic.get_state(),
@@ -799,11 +786,14 @@ class AutonomousAgent:
                 # 读取 TaskRegistry
                 bg_tasks_xml = await global_task_registry.render_for_prompt()
 
-                # 3. 附加 Scratchpad
-                scratchpad_dump = json.dumps(self.scratchpad, indent=2, ensure_ascii=False)
+                # 附加 Scratchpad
+                scratchpad_dump = json.dumps(current_scratchpad, indent=2, ensure_ascii=False)
 
                 monitor_registry.register_text_source(
-                    "认知", "Scratchpad", lambda: scratchpad_dump
+                    "认知", "Scratchpad",
+                    lambda: json.dumps(
+                        self.session_scratchpads.get(getattr(self, "active_session_id", "system_default"), {}),
+                        indent=2, ensure_ascii=False)
                 )
 
                 final_system_prompt = (
@@ -819,7 +809,6 @@ class AutonomousAgent:
                 if bg_tasks_xml:
                     final_system_prompt += f"\n\n后台任务：\n{bg_tasks_xml}"
 
-                # --- 心理状态强制劫持 (积极静默机制) ---
                 if getattr(self, "_current_reaction", None) and self._current_reaction.value == "silent_observe":
                     final_system_prompt += (
                         f"\n\n<Subconscious_Override>\n"
@@ -842,7 +831,6 @@ class AutonomousAgent:
                     lambda: final_system_prompt
                 )
 
-                # 9. 覆盖当前会话头部
                 active_history[0] = {"role": "system", "content": final_system_prompt}
 
                 # 调试日志落盘
@@ -855,10 +843,8 @@ class AutonomousAgent:
                 except Exception as e:
                     logger.warning(f"Failed to write debug logs: {e}")
 
-                # 10. 调用 LLM (定向投递局部上下文)
                 response_data = await self._call_llm(current_session)
 
-                # 11. 解析响应与回填物理隔离历史
                 parsed_data = response_data.get("content", {})
                 tool_queue = response_data.get("tool_calls", [])
                 raw_receive = response_data.get("raw_receive", {})
@@ -873,34 +859,36 @@ class AutonomousAgent:
                                          if isinstance(parsed_data, dict) else str(parsed_data))
                     active_history.append({"role": "assistant", "content": formatted_content})
 
-                # [死锁检测] 将结构化数据序列化后比对
+                # [会话级死锁检测]
                 content_for_deadlock = (json.dumps(parsed_data, sort_keys=True)
                                         if isinstance(parsed_data, dict) else str(parsed_data))
-                if content_for_deadlock and content_for_deadlock == self.last_response_content and not tool_queue:
-                    logger.warning("⚠️ 检测到内容重复死锁。")
+
+                last_res = self.session_last_responses.get(current_session, "")
+                if content_for_deadlock and content_for_deadlock == last_res and not tool_queue:
+                    logger.warning(f"⚠️ 频道 [{current_session}] 检测到内容重复死锁。")
                     active_history.append({
                         "role": "user",
                         "content": "SYSTEM WARNING: 你输出的内容与上一次完全一致，且未执行任何操作。请改变策略，或使用 wait 工具挂起。"
                     })
                     continue  # 跳过本次处理，直接进入下一轮接收系统警告
 
-                self.last_response_content = content_for_deadlock
+                self.session_last_responses[current_session] = content_for_deadlock
 
                 # --- C. 行动阶段 (Action) ---
-                self.next_response_use_tools = False
+                self.session_next_use_tools[current_session] = False
 
                 if isinstance(parsed_data, dict):
                     monologue = parsed_data.get("inner_monologue", {})
                     emotion = monologue.get("emotion_check", "Neutral")
                     plan = monologue.get("planning", "No plan")
 
-                    # 1. 提取意愿微调量 (Delta)
+                    # 提取意愿微调量 (Delta)
                     try:
                         shift = float(monologue.get("willingness_shift", 0.0))
                     except (ValueError, TypeError):
                         shift = 0.0
 
-                    # 2. 意愿演算与物理收束
+                    # 意愿演算与物理收束
                     current_will = self.session_willingness.get(current_session, 0.5)
                     new_will = max(0.0, min(1.0, current_will + shift))
                     self.session_willingness[current_session] = new_will
@@ -939,8 +927,8 @@ class AutonomousAgent:
 
                     tasks = parsed_data.get("tasks", None)
                     if tasks and isinstance(tasks, list):
-                        self.scratchpad["tasks"] = tasks
-                        self.tool_manager.agent_state = self.scratchpad
+                        current_scratchpad["tasks"] = tasks
+                        self.tool_manager.agent_state = current_scratchpad
 
                     # 3. 在系统广播中暴露出意愿与焦点的变化轨迹
                     self.event_bus.publish_action(Action(
@@ -953,7 +941,7 @@ class AutonomousAgent:
                         self.force_sleep = True
 
                     if action in ["reply", "tool"]:
-                        self.next_response_use_tools = True
+                        self.session_next_use_tools[current_session] = True
 
                 # 执行工具队列
                 if tool_queue:
@@ -1105,20 +1093,21 @@ class AutonomousAgent:
         return f"【未知信号】系统接收到底层事件: {json.dumps(simple_data, ensure_ascii=False)}"
 
     async def _process_incoming_event(self, event: OneBotEvent):
-        """
-        处理外部事件：
-        1. 让边缘系统“感受”刺激 (Process Stimulus)
-        2. 将事件写入历史记录
-        """
+        """兜底物理写入逻辑，同样施加会话级状态隔离"""
         if event.type == EventType.META:
             return
 
-        # 1. 边缘系统介入 (只处理文本消息)
+        # 边缘系统介入 (只处理文本消息)
         # 只有真实人类的消息才算作"刺激"，内部信号不算
         if event.type == EventType.MESSAGE and isinstance(event.message, str):
             # 异步调用，不阻塞主流程太多
             asyncio.create_task(self.limbic.process_stimulus(event.message))
-            self.last_observation_text = event.message
+            platform_name = getattr(event.source, "platform", "unknown")
+            ctx_type = "group" if event.source.group_id else "private"
+            ctx_id = event.source.group_id if event.source.group_id else event.source.user_id
+            session_id = f"{ctx_type}_{platform_name}:{ctx_id}"
+
+            self.session_last_observations[session_id] = event.message
 
         # 自动捕获用户
         # 尝试从 source 中获取用户信息
@@ -1131,7 +1120,7 @@ class AutonomousAgent:
         session_id = f"{ctx_type}_{platform_name}:{ctx_id}"
         self.active_session_id = session_id
 
-        # 2. 序列化事件
+        # 序列化事件
         event_data = event.model_dump(exclude_none=True)
         # 清理冗余字段
         for field in ["id", "time", "raw_data"]:
@@ -1143,19 +1132,18 @@ class AutonomousAgent:
             # 强制唤醒
             self.is_sleeping = False
 
-        # 3. 更新 Scratchpad 上下文 (如果是消息事件)
+        # 更新 Scratchpad 上下文 (如果是消息事件)
         if event.source.platform in adapter_names:
-            source = event.source
-            ctx_type = "group" if source.group_id else "private"
-            ctx_id = source.group_id if source.group_id else source.user_id
+            if session_id not in self.session_scratchpads:
+                self.session_scratchpads[session_id] = {"current_interactor": {}, "last_context": {}}
 
-            self.scratchpad["last_context"] = {
-                "platform": source.platform,
+            self.session_scratchpads[session_id]["last_context"] = {
+                "platform": event.source.platform,
                 "type": ctx_type,
                 "id": ctx_id
             }
 
-        # 1. 决定消息内容
+        # 决定消息内容
         if event.type == EventType.MESSAGE:
             # 正常对话消息，直接使用
             content_msg = f"接收到用户消息：{json.dumps(event_data, ensure_ascii=False)}"
@@ -1165,7 +1153,7 @@ class AutonomousAgent:
             content_msg = self._transcribe_event(event)
             is_ephemeral = True  # 标记为瞬时消息，不需要存入长时记忆
 
-        # 2. 构建历史记录对象 (增加了 metadata 字段)
+        # 构建历史记录对象 (增加了 metadata 字段)
         history_item = {
             "role": "user",
             "content": str(content_msg),
@@ -1184,27 +1172,14 @@ class AutonomousAgent:
         self.session_last_active[session_id] = time.time()
         logger.info(f"Event Ingested (Fallback): {event.type}.{event.detail_type} -> Routed to [{session_id}]")
 
-    async def _active_retrieval(self) -> List[str]:
-        """
-        [跨群记忆互通] 双通道主动检索逻辑：
-        通道 A: 针对当前交互对象的私人历史 (Episodic/Core)
-        通道 B: 跨越所有会话的全局客观知识 (Semantic)
-        """
-        # 1. 获取当前目标 PUID (用于私域检索)
-        active_puid = self.scratchpad.get("active_puid")
-
-        # 2. 构建查询关键字
+    async def _active_retrieval(self, active_puid: str, last_obs: str, current_goal: str) -> List[str]:
         query_parts = []
-        current_goal = self.scratchpad.get("current_goal", "")
         if current_goal:
             query_parts.append(current_goal)
-
-        last_obs = getattr(self, "last_observation_text", "")
         if last_obs:
             query_parts.append(last_obs)
 
         if not query_parts:
-            # 如果什么都没有，就不浪费 Token 去搜了
             return []
 
         query = " ".join(query_parts)
@@ -1389,9 +1364,11 @@ class AutonomousAgent:
             entry = {k: v for k, v in d.items() if k != 'metadata'}
             sanitized_history.append(entry)
 
+        require_tools = self.session_next_use_tools.get(session_id, False)
+
         return await self.api_client.create_chat_completion(
             messages=sanitized_history,
             tools=tools if tools else None,
             schema=thought_structure,
-            require_tools=self.next_response_use_tools
+            require_tools=require_tools
         )
