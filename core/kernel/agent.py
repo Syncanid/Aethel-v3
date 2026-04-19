@@ -222,8 +222,30 @@ class AutonomousAgent:
         session_id = f"{ctx_type}_{platform_name}:{ctx_id}"
 
         if event.detail_type == DetailType.CROSS_SESSION_DIRECTIVE:
-            session_id = event.extra.get("target_session_id", "system_default")
-            logger.warning(f"🛸 [维度跳跃] 捕获到跨区指令，强制将焦点切换至: {session_id}")
+            target_sid = event.extra.get("target_session_id")
+            reason = event.extra.get("directive_reason", "未知任务")
+            context = event.extra.get("carried_context", "")
+
+            logger.warning(f"🛸 [维度跳跃] 焦点切换至: {target_sid}")
+            self.active_session_id = target_sid
+
+            # 如果目标频道尚未初始化，或需要强制注入任务上下文
+            if target_sid not in self.working_memory:
+                self.working_memory[target_sid] = [{"role": "system", "content": "INITIALIZING..."}]
+
+            # 注入“意识降临”信息，确保 S1 醒来时知道发生了什么
+            arrival_msg = {
+                "role": "user",
+                "content": (
+                    f"【跨域意识投射】你刚刚从其他维度降临至此。\n"
+                    f"本次降临的任务目的：{reason}\n"
+                    f"随意识携带的关键情报：\n{context}\n"
+                    f"请立刻根据此上下文展开后续行动。"
+                ),
+                "metadata": {"type": "system_directive", "session_id": target_sid}
+            }
+            self.working_memory[target_sid].append(arrival_msg)
+            return
 
         self.active_session_id = session_id
 
@@ -322,6 +344,16 @@ class AutonomousAgent:
                 except:
                     pass
 
+        if event.detail_type == DetailType.CROSS_SESSION_DIRECTIVE:
+            logger.info(f"🚨 [Attention] 拦截到系统级跨域跳跃指令，无条件放行并强制唤醒！")
+            self._should_think_after_event = True
+            if self.wakeup_job_id:
+                try:
+                    self.scheduler.remove_job(self.wakeup_job_id)
+                    self.wakeup_job_id = None
+                except:
+                    pass
+
             await next_call()
             return
 
@@ -353,7 +385,7 @@ class AutonomousAgent:
                 self.force_sleep = True
             self._should_think_after_event = False
 
-        elif reaction.value == "silent_observe":
+        elif reaction.value == ReactionType.SILENT_OBSERVE:
             logger.info(f"😒 [Observer] 决定不理会 (积极静默，将产生内心独白): {event.id}")
             self._should_think_after_event = True
             if self.wakeup_job_id:
@@ -900,18 +932,21 @@ class AutonomousAgent:
                                         if isinstance(parsed_data, dict) else str(parsed_data))
 
                 last_res = self.session_last_responses.get(current_session, "")
-                if content_for_deadlock and content_for_deadlock == last_res and not tool_queue:
-                    logger.warning(f"⚠️ 频道 [{current_session}] 检测到内容重复死锁。")
+
+                if content_for_deadlock and content_for_deadlock == last_res:
+                    logger.warning(f"⚠️ 频道 [{current_session}] 检测到内容/工具调用重复死锁。")
                     active_history.append({
                         "role": "user",
-                        "content": "SYSTEM WARNING: 你输出的内容与上一次完全一致，且未执行任何操作。请改变策略，或使用 wait 工具挂起。"
+                        "content": "SYSTEM WARNING: 致命错误！你输出的心流决策和调用的工具与上一次【完全一致】，导致了无限死循环！请立刻改变策略、调用 `wait` 挂起，或者将 action 设为 `ignore` 结束回合！"
                     })
-                    continue  # 跳过本次处理，直接进入下一轮接收系统警告
+                    # 强行切断连续执行锁，防止系统卡死
+                    self.session_next_use_tools[current_session] = False
+                    continue
 
                 self.session_last_responses[current_session] = content_for_deadlock
 
                 # --- C. 行动阶段 (Action) ---
-                self.session_next_use_tools[current_session] = False
+                old_session_id = current_session
 
                 if isinstance(parsed_data, dict):
                     monologue = parsed_data.get("inner_monologue", {})
@@ -925,9 +960,9 @@ class AutonomousAgent:
                         shift = 0.0
 
                     # 意愿演算与物理收束
-                    current_will = self.session_willingness.get(current_session, 0.5)
+                    current_will = self.session_willingness.get(old_session_id, 0.5)
                     new_will = max(0.0, min(1.0, current_will + shift))
-                    self.session_willingness[current_session] = new_will
+                    self.session_willingness[old_session_id] = new_will
 
                     new_focus = monologue.get("cognitive_focus", "")
                     if new_focus:
@@ -943,7 +978,7 @@ class AutonomousAgent:
                     keywords = atmosphere.get("keywords", [])
                     summary = atmosphere.get("summary", "")
 
-                    if keywords and summary and current_session.startswith("group_"):
+                    if keywords and summary and old_session_id.startswith("group_"):
                         # 提取当前话题的参与者 (最近 20 条消息的活跃用户)
                         recent_puids = list(set(
                             m.get("metadata", {}).get("puid")
@@ -951,7 +986,7 @@ class AutonomousAgent:
                             if m.get("role") == "user" and m.get("metadata", {}).get("puid")
                         ))
 
-                        self.global_blackboard[current_session] = {
+                        self.global_blackboard[old_session_id] = {
                             "keywords": keywords,
                             "summary": summary,
                             "participants": recent_puids,
@@ -974,12 +1009,12 @@ class AutonomousAgent:
                     ))
 
                     if action in ["ignore"]:
-                        self.session_next_use_tools[current_session] = False
+                        self.session_next_use_tools[old_session_id] = False
                         if not any(self.session_next_use_tools.values()):
                             self.force_sleep = True
 
                     if action in ["reply", "tool"]:
-                        self.session_next_use_tools[current_session] = True
+                        self.session_next_use_tools[old_session_id] = True
 
                 # 执行工具队列
                 if tool_queue:
@@ -1028,6 +1063,14 @@ class AutonomousAgent:
                                 "name": name,
                                 "content": error_msg
                             })
+
+                # 如果工具执行期间（如 create_session）切换了焦点，则将“思考连续性”转移至新频道
+                new_session_id = getattr(self, "active_session_id", old_session_id)
+                if new_session_id != old_session_id:
+                    if self.session_next_use_tools.get(old_session_id, False):
+                        self.session_next_use_tools[old_session_id] = False
+                        self.session_next_use_tools[new_session_id] = True
+                        logger.info(f"🔄 认知连续性跨域转移: {old_session_id} -> {new_session_id}")
 
                 await self.save_state()
 

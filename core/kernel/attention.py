@@ -129,7 +129,7 @@ class AttentionFilter:
         event_detail = getattr(event, "detail_type", "")
         if event_detail in target_details:
             logger.info(f"⚡ [Attention] 触发本能反射：{event_detail}。")
-            return ReactionType.REPLY
+            return ReactionType.INTERJECT
 
         return None
 
@@ -266,11 +266,11 @@ class AttentionFilter:
             context_str = "\n".join(lines)
 
         prompt = f"""
-你是一个具备高度拟人化社会心智的 AI ({self.nickname}) 的潜意识网关。
-你的唯一任务是：基于当前的生理阻力与环境语境，决定对这条消息的**最低限度反应**。不要思考怎么回复，只思考是否动作。
+你是一个具备高度拟人化社会心智的 AI ({self.nickname}) 的潜意识网关（注意力门控）。
+请摒弃机械的条件判断规则，调用你的“社交直觉”和“意图穿透能力”。你的唯一任务是：基于生理状态、环境空气和对话的潜在意图，决定当前的【介入姿态】。
 
-【生理与环境状态】
-当前的行动阻力值: {threshold:.2f} (范围 0.05~0.95。阻力越高，你越不想说话。大于 0.8 时处于极度自闭状态)
+【生理与微观环境】
+当前的行动阻力值: {threshold:.2f} (0.05~0.95。阻力越高，代表你越疲惫/越不想动)
 状态影响因子: [{state_desc}]
 你当前的认知兴趣点: "{await self.get_current_interest_text()}"
 
@@ -282,32 +282,25 @@ class AttentionFilter:
 近期微观上下文:
 {context_str}
 
-【绝对决策准则】(必须严格对应 decision 字段)
-1. "REPLY" (必须回复)：
-   - 触发条件：满足以下任一情况即可触发：
-     a) 处于【私聊】环境（天然具备明确指向性）。
-     b) 在群聊中对方明确 @ 了你。
-     c) 消息是对你上一句发言的延续。
-     d) 极其基础的社交握手（如“你好”、“在吗”），且你当前的意愿足够击穿阻力。
-   - 约束：在【群聊】中，如果既没有明确指向你，也不是社交握手，绝对禁止使用 REPLY。
-2. "INTERJECT" (主动插话)：
-   - 触发条件：你没有被点名，但话题与你的【认知兴趣点】高度契合且有技术深度。
-   - 约束：严禁对纯粹的表情包或无意义的日常感叹（如“确实”、“草”）进行插话。
-3. "SILENT_OBSERVE" (积极静默)：
-   - 触发条件：对方虽然指向了你，但你当前阻力值极高（极度疲惫），或对方的话语极度无聊，你决定“已读不回”。
-4. "OBSERVE" (普通观察)：
-   - 触发条件：你没有被点名的话题，且话题不足以触发你的兴趣。
-5. "IGNORE" (纯粹噪音)：
-   - 触发条件：毫无意义的乱码、纯表情包刷屏，你连观察的兴趣都没有。
+【可用介入姿态的语义解析】(请根据社交直觉自由评估)
+- "REPLY" (开口回应): 顺滑的社交接续。对方在期待你的语言反馈，或是正常的对话抛接球。
+- "INTERJECT" (动作切入): 打破常规节奏。你察觉到必须立刻执行某项任务、处理具体的参数（如去某个ID/链接）、或遇到了极度契合兴趣的绝佳切入点。
+- "SILENT_OBSERVE" (积极静默): 察觉到指向你的交互，但因为极度疲惫、无聊或抗拒，主观决定“已读不回”。
+- "OBSERVE" (普通观察): 保持背景聆听。不属于你的话题，且没有引起你的兴趣。
+- "IGNORE" (纯粹噪音): 毫无价值的乱码或刷屏，直接在大脑中过滤。
 
-【推演与输出】
-1. 评估你对该消息的“交互意愿置信度” (0.0~1.0)。
-2. 置信度必须大于当前的行动阻力值({threshold:.2f})，你才能选择 REPLY 或 INTERJECT。否则必须降级为 OBSERVE 或 SILENT_OBSERVE。
+【推演与输出协议 (JSON)】
+你必须严格按照以下顺序进行思维推演和决策输出：
+
+1. `think`: (思维链) 在这里进行一段简短的内部推理。分析对方的隐性意图是什么？这句话是否包含需要处理的隐藏指令？当前环境是否适合介入？阻力值是否允许介入？
+2. `confidence`: (0.0~1.0) 评估你得出该决策的置信度。
+3. `decision`: 综合上述推演，在上述5种姿态中选择最符合人类社交直觉的一项。(置信度必须大于阻力值 {threshold:.2f} 才能输出 REPLY/INTERJECT)
 
 严格按照以下 JSON 格式输出：
 {{
+    "think": "首先，我处于...环境。这句话的表面意思是...，其实质意图/任务是...。结合当前的低阻力值，我应该...",
+    "reason": "简短的心理状态与动机分析",
     "decision": "REPLY" | "INTERJECT" | "SILENT_OBSERVE" | "OBSERVE" | "IGNORE",
-    "reason": "简短的一句话心理动机分析",
     "confidence": 0.0 到 1.0 之间的浮点数
 }}
 """
@@ -319,8 +312,9 @@ class AttentionFilter:
                 schema={
                     "type": "object",
                     "properties": {
-                        "decision": {"type": "string", "enum": ["REPLY", "INTERJECT", "SILENT_OBSERVE", "OBSERVE", "IGNORE"]},
+                        "think": {"type": "string"},
                         "reason": {"type": "string"},
+                        "decision": {"type": "string", "enum": ["REPLY", "INTERJECT", "SILENT_OBSERVE", "OBSERVE", "IGNORE"]},
                         "confidence": {"type": "number"}
                     },
                     "required": ["decision", "reason", "confidence"],

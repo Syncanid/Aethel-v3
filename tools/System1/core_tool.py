@@ -2,7 +2,6 @@
 import asyncio
 import datetime
 import logging
-import time
 from typing import Any, Optional, List, Literal
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -11,7 +10,6 @@ from dateutil import parser
 from core.io.event_bus import EventBus
 from core.io.event_schema import Action, ActionStatus, EventSource, OneBotEvent, DetailType, EventType
 from core.kernel.agent import AutonomousAgent
-from core.kernel.task_registry import global_task_registry
 from core.limbic.manager import LimbicManager
 from core.tool_manager.registry import register
 
@@ -19,17 +17,25 @@ logger = logging.getLogger(__name__)
 
 
 # --- 内部辅助函数：发送唤醒事件 ---
-async def _dispatch_wake_up(event_bus: EventBus, reason: str):
-    """调度器回调：发送唤醒事件"""
-    logger.info(f"⏰ 等待结束，触发唤醒: {reason}")
+async def _dispatch_wake_up(event_bus: EventBus, reason: str, target_session: str):
+    """
+    精准唤醒：携带锚点的系统闹钟。
+    """
+    logger.info(f"⏰ 房间 [{target_session}] 的等待时间结束，触发唤醒: {reason}")
+
+    # 构造跨域指令事件，强行把 Agent 的焦点拉回设定闹钟的频道
     event = OneBotEvent(
-        type=EventType.NOTICE,  # 使用 Notice 类型
-        detail_type="wake_up",
-        sub_type="timer",
+        type=EventType.NOTICE,
+        detail_type=DetailType.CROSS_SESSION_DIRECTIVE,
         source=EventSource(platform="system"),
-        message=f"【系统唤醒】: {reason}",
-        alt_message=f"【系统唤醒】: {reason}",
-        extra={"status": "wake_up"}
+        message=f"【时钟唤醒】: {reason}",
+        alt_message=f"【时钟唤醒】: {reason}",
+        extra={
+            "status": "wake_up",
+            "target_session_id": target_session,
+            "directive_reason": "你设定的闹钟/休眠时间已到。",
+            "carried_context": reason
+        }
     )
     event_bus.publish_event(event)
 
@@ -117,17 +123,20 @@ async def _execute_send_message(
         if not scheduler:
             return f"{final_status}。但警告：调度器未初始化，系统未能进入等待状态。"
 
+        # 获取当前的物理频道
+        current_session = agent.active_session_id if agent else "system_default"
+
         # 添加调度任务
         job = scheduler.add_job(
-            _dispatch_wake_up,
-            'date',
+            _dispatch_wake_up, 'date',
             run_date=datetime.datetime.now() + datetime.timedelta(minutes=wait_minutes),
-            args=[event_bus, "你设定的等待时间已结束，期间未收到任何外部消息。"]
+            args=[event_bus, "你设定的等待时间已结束，期间未收到任何外部消息。", current_session]
         )
 
         if agent:
             agent.wakeup_job_id = job.id
             agent.is_sleeping = True
+            agent.session_next_use_tools[agent.active_session_id] = False
 
         logger.info(f"💤 消息发送完毕，已进入等待状态。")
 
@@ -137,7 +146,7 @@ async def _execute_send_message(
 @register()
 async def send_message(
         message: str,
-        wait_minutes: Optional[float] = None,
+        wait_minutes: float,
         event_bus: EventBus = None,
         agent: AutonomousAgent = None,
         scheduler: AsyncIOScheduler = None,
@@ -150,7 +159,7 @@ async def send_message(
 
     Args:
         message: 消息内容。
-        wait_minutes: (可选) 发送后等待的分钟数，小于等于0或为空则不等待。
+        wait_minutes: 发送后等待的分钟数，小于等于0或为空则不等待。
     """
     if not agent:
         return "错误: 无法获取系统 Agent 上下文。"
@@ -215,10 +224,58 @@ async def create_session(
             {"role": "user",
              "content": f"【系统流转】你刚刚主动跨越维度，开启了与该目标 [{target_id}] 的连接通道。\n你来到这里的核心任务/目的是：{mission}\n请立刻评估环境，并在下一次行动中执行你的目的。"}
         ]
-        logger.info(f"🆕 [create_session] 已强制建立并劫持焦点至全新认知会话: {session_id}，目的: {mission}")
+        logger.info(f"🆕 [create_session] 已建立并转移焦点至: {session_id}，目的: {mission}")
 
     # 3. 仅返回物理连通状态，把说话的权力交还给模型的主循环
     return f"通道建立成功！你的意识已投射至 [{session_id}]。请立刻在接下来的心流中根据你的目的 ({mission}) 展开行动。"
+
+
+@register()
+async def bridge_to_session(
+        platform: str,
+        target_id: str,
+        target_type: Literal["private", "group"],
+        mission: str,
+        context_data: str,
+        agent: AutonomousAgent = None,
+        event_bus: EventBus = None
+) -> str:
+    """
+    【认知桥接】：将当前的意识焦点、任务数据和目标任务迁移至另一个会话空间。
+    适用于：当你决定从私聊环境进入群聊执行任务，或者需要将正在处理的数据传递给另一个用户时。
+
+    Args:
+        platform: 目标平台 (如 "onebot")。
+        target_id: 目标的 user_id 或 group_id。
+        target_type: "private" 或 "group"。
+        mission: 在目标空间的行动目的。
+        context_data: 必须随意识携带过去的关键数据、之前的分析结论或任务上下文。
+    """
+    if not agent or not event_bus:
+        return "错误: 系统组件未就绪。"
+
+    # 1. 格式约束
+    target_session = f"{target_type}_{platform}:{target_id}"
+    origin_session = agent.active_session_id
+
+    # 2. 构造跨域指令事件
+    event = OneBotEvent(
+        type=EventType.NOTICE,
+        detail_type=DetailType.CROSS_SESSION_DIRECTIVE,
+        source=EventSource(platform="system"),
+        message=f"【跨域迁移请求】目标: {target_session}",
+        extra={
+            "target_session_id": target_session,
+            "origin_session_id": origin_session,
+            "directive_reason": mission,
+            "carried_context": context_data
+        }
+    )
+
+    # 3. 发布事件，触发中间件的物理跳转逻辑
+    event_bus.publish_event(event)
+
+    return f"认知桥接已启动。焦点已尝试投射至 {target_session}。"
 
 
 @register()
@@ -260,6 +317,8 @@ async def wait(
     else:
         return "错误: 必须提供 'duration' (分) 或 'until' (日期字符串) 其中之一。"
 
+    current_session = agent.active_session_id if agent else "system_default"
+
     # 2. 添加调度任务
     if scheduler and run_date:
         # 获取 job 对象
@@ -267,14 +326,14 @@ async def wait(
             _dispatch_wake_up,
             'date',
             run_date=run_date,
-            args=[event_bus, "你设定的等待时间已结束，期间未收到任何外部消息。"]
+            args=[event_bus, "你设定的等待时间已结束，期间未收到任何外部消息。", current_session]
         )
 
         # 将 Job ID 绑定到 Agent 实例，用于后续取消
         if agent:
             agent.wakeup_job_id = job.id
             agent.is_sleeping = True
-
+            agent.session_next_use_tools[agent.active_session_id] = False
         return None
     else:
         return "系统错误: 调度器未初始化。"
@@ -307,6 +366,7 @@ async def wait_forever(
 
         # 强制设置休眠标志
         agent.is_sleeping = True
+        agent.session_next_use_tools[agent.active_session_id] = False
 
     # 广播系统状态变更
     if event_bus:
@@ -316,78 +376,6 @@ async def wait_forever(
         ))
 
     return None
-
-
-@register()
-async def cross_session_dispatch(
-        target_session_id: str,
-        directive_reason: str,
-        carried_context: str,
-        target_puid: str = "",
-        s2_task_id: str = "",
-        variables: dict = None,
-        event_bus: EventBus = None
-) -> str:
-    """
-    跨越当前物理空间，前往另一个群聊或私聊去寻找特定人员，并传达信息或交接任务。
-    使用此工具后，你的主意识会立刻被传送到目标房间，并使用目标房间的身份面具与对方说话。
-
-    :param target_session_id: 必须精准提供目标空间ID (格式如 group_onebot:12345, private_console:67890)。
-    :param directive_reason: 你跨区找他的核心目的与原因 (例如：'转达刚才群里的报错信息')。
-    :param carried_context: 你需要携带的情报、上下文 (请尽可能详细)。
-    :param target_puid: 你要找的具体目标人员的 PUID。如果是向全群广播，可留空。
-    :param s2_task_id: (可选) 如果你跨域是为了移交或共享某个后台 System 2 任务，请填写该任务 ID。目标房间将自动订阅该任务的后续进度。
-    :param variables: (可选) 跨会话需要传递的具体结构化变量/最终计算结果。
-    """
-    if variables is None:
-        variables = {}
-
-    # 1. 如果携带了 S2 任务，在投射前物理挂载目标房间
-    system_log = ""
-    if s2_task_id:
-        active_tasks = await global_task_registry.get_active_tasks()
-        if any(t.task_id == s2_task_id for t in active_tasks):
-            await global_task_registry.subscribe_session(s2_task_id, target_session_id)
-            system_log = f"\n[系统底层同步] 已将目标房间 {target_session_id} 成功桥接至任务 {s2_task_id} 的多路广播网络。"
-        else:
-            system_log = f"\n[系统底层警告] 尝试桥接任务 {s2_task_id} 失败，该任务可能已终结或 ID 错误。"
-
-        carried_context += system_log
-
-    # 2. 构造一个虚假的源 (Source)，伪装成系统底层发出的最高优指令
-    pseudo_source = EventSource(
-        platform="system",
-        user_id="internal_daemon",
-        group_id=""
-    )
-
-    # 3. 构造特权跨会话事件，将状态与变量打包入 extra
-    dispatch_event = OneBotEvent(
-        id=f"dispatch_{int(time.time() * 1000)}",
-        time=time.time(),
-        type=EventType.NOTICE,
-        detail_type=DetailType.CROSS_SESSION_DIRECTIVE,
-        sub_type="projection",
-        source=pseudo_source,
-        message="[跨会话意识投射]",
-        alt_message="[跨会话意识投射]",
-        extra={
-            "target_session_id": target_session_id,
-            "target_puid": target_puid,
-            "directive_reason": directive_reason,
-            "carried_context": carried_context,
-            "s2_task_id": s2_task_id,
-            "variables": variables
-        }
-    )
-
-    # 4. 异步推入事件总线
-    if event_bus:
-        event_bus.publish_event(dispatch_event)
-    else:
-        return "严重错误：事件总线 (EventBus) 未成功注入，意识投射失败。"
-
-    return f"意识投射程序已启动。你的意识正在被传输至 [{target_session_id}]...{system_log}"
 
 
 @register()
