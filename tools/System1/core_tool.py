@@ -28,8 +28,8 @@ async def _dispatch_wake_up(event_bus: EventBus, reason: str, target_session: st
         type=EventType.NOTICE,
         detail_type=DetailType.CROSS_SESSION_DIRECTIVE,
         source=EventSource(platform="system"),
-        message=f"【时钟唤醒】: {reason}",
-        alt_message=f"【时钟唤醒】: {reason}",
+        message=f"【系统唤醒】: {reason}",
+        alt_message=f"【系统唤醒】: {reason}",
         extra={
             "status": "wake_up",
             "target_session_id": target_session,
@@ -256,7 +256,19 @@ async def bridge_to_session(
 
     # 1. 格式约束
     target_session = f"{target_type}_{platform}:{target_id}"
-    origin_session = agent.active_session_id
+    origin_session = getattr(agent, "active_session_id", "system_default")
+
+    # 为目标频道初始化 last_context
+    if target_session not in agent.session_scratchpads:
+        agent.session_scratchpads[target_session] = {"current_interactor": {}, "last_context": {}}
+
+    agent.session_scratchpads[target_session]["last_context"] = {
+        "platform": platform,
+        "type": target_type,
+        "id": target_id
+    }
+
+    agent.active_session_id = target_session
 
     # 2. 构造跨域指令事件
     event = OneBotEvent(

@@ -226,25 +226,36 @@ class AutonomousAgent:
             reason = event.extra.get("directive_reason", "未知任务")
             context = event.extra.get("carried_context", "")
 
-            logger.warning(f"🛸 [维度跳跃] 焦点切换至: {target_sid}")
+            logger.warning(f"🛸 [维度跳跃/唤醒] 焦点切换至: {target_sid}")
             self.active_session_id = target_sid
 
             # 如果目标频道尚未初始化，或需要强制注入任务上下文
             if target_sid not in self.working_memory:
                 self.working_memory[target_sid] = [{"role": "system", "content": "INITIALIZING..."}]
 
-            # 注入“意识降临”信息，确保 S1 醒来时知道发生了什么
-            arrival_msg = {
-                "role": "user",
-                "content": (
-                    f"【跨域意识投射】你刚刚从其他维度降临至此。\n"
-                    f"本次降临的任务目的：{reason}\n"
-                    f"随意识携带的关键情报：\n{context}\n"
-                    f"请立刻根据此上下文展开后续行动。"
-                ),
-                "metadata": {"type": "system_directive", "session_id": target_sid}
-            }
+            if event.extra.get("status") == "wake_up":
+                arrival_msg = {
+                    "role": "user",
+                    "content": (
+                        f"【系统调度通知】{context}\n"
+                        f"请基于当前的上下文评估环境。如果没有明确的交流必要或新的互动，请保持安静（建议调用 wait/wait_forever 再次挂起，或将 action 设为 ignore 结束回合），切勿生硬地为了说话而说话。"
+                    ),
+                    "metadata": {"type": "system_directive", "session_id": target_sid}
+                }
+            else:
+                arrival_msg = {
+                    "role": "user",
+                    "content": (
+                        f"【跨域意识投射】你刚刚从其他维度降临至此。\n"
+                        f"本次降临的任务目的：{reason}\n"
+                        f"随意识携带的关键情报：\n{context}\n"
+                        f"请立刻根据此上下文展开后续行动。"
+                    ),
+                    "metadata": {"type": "system_directive", "session_id": target_sid}
+                }
+
             self.working_memory[target_sid].append(arrival_msg)
+            await next_call()
             return
 
         self.active_session_id = session_id
