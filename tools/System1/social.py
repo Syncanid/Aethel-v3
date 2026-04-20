@@ -75,62 +75,62 @@ async def social_record_user(
     )
 
 
-@register()
-async def social_update_perception(
-        puid: str,
-        dimension: str,
-        delta: float,
-        reason: str,
-        user_manager: UserManager
-) -> str:
-    """
-    更新你对某个用户的情感 / 认知维度。
-
-    Args:
-        puid: 用户唯一标识 (platform:user_id)
-        dimension: 维度可选 [favorability(好感), trust(信任), intimacy(亲密)]
-        delta: 变化值（建议范围 -10.0 ~ +10.0）
-        reason: 变更原因（将作为记忆凭证写入历史）
-    """
-    profile = await user_manager.get_user(puid)
-    if not profile:
-        return f"未找到用户档案 (UID: {puid})，请先使用 `social_record_user` 进行录入。"
-
-    # 维度配置表
-    DIMENSIONS: Dict[str, Dict] = {
-        "favorability": {"min": -100.0, "max": 100.0, "label": "好感度"},
-        "trust": {"min": 0.0, "max": 100.0, "label": "信任度"},
-        "intimacy": {"min": 0.0, "max": 100.0, "label": "亲密度"},
-    }
-
-    if dimension not in DIMENSIONS:
-        return (
-            "无效的维度。\n"
-            "可选：favorability（好感）, trust（信任）, intimacy（亲密）"
-        )
-
-    conf = DIMENSIONS[dimension]
-    old_value = getattr(profile, dimension, 0.0)
-    new_value = _clamp(old_value + delta, conf["min"], conf["max"])
-    setattr(profile, dimension, new_value)
-
-    # 记录历史（结构化，方便未来分析）
-    profile.meta.setdefault("history", []).append({
-        "time": time.time(),
-        "dimension": dimension,
-        "delta": delta,
-        "from": old_value,
-        "to": new_value,
-        "reason": reason,
-    })
-
-    await user_manager.save_user(profile)
-
-    return (
-        f"已更新 {profile.nickname} 的{conf['label']}\n"
-        f"- 变化：{old_value:.1f} → {new_value:.1f} ({delta:+.1f})\n"
-        f"- 原因：{reason}"
-    )
+# @register()
+# async def social_update_perception(
+#         puid: str,
+#         dimension: str,
+#         delta: float,
+#         reason: str,
+#         user_manager: UserManager
+# ) -> str:
+#     """
+#     更新你对某个用户的情感 / 认知维度。
+#
+#     Args:
+#         puid: 用户唯一标识 (platform:user_id)
+#         dimension: 维度可选 [favorability(好感), trust(信任), intimacy(亲密)]
+#         delta: 变化值（建议范围 -10.0 ~ +10.0）
+#         reason: 变更原因（将作为记忆凭证写入历史）
+#     """
+#     profile = await user_manager.get_user(puid)
+#     if not profile:
+#         return f"未找到用户档案 (UID: {puid})，请先使用 `social_record_user` 进行录入。"
+#
+#     # 维度配置表
+#     DIMENSIONS: Dict[str, Dict] = {
+#         "favorability": {"min": -100.0, "max": 100.0, "label": "好感度"},
+#         "trust": {"min": 0.0, "max": 100.0, "label": "信任度"},
+#         "intimacy": {"min": 0.0, "max": 100.0, "label": "亲密度"},
+#     }
+#
+#     if dimension not in DIMENSIONS:
+#         return (
+#             "无效的维度。\n"
+#             "可选：favorability（好感）, trust（信任）, intimacy（亲密）"
+#         )
+#
+#     conf = DIMENSIONS[dimension]
+#     old_value = getattr(profile, dimension, 0.0)
+#     new_value = _clamp(old_value + delta, conf["min"], conf["max"])
+#     setattr(profile, dimension, new_value)
+#
+#     # 记录历史（结构化，方便未来分析）
+#     profile.meta.setdefault("history", []).append({
+#         "time": time.time(),
+#         "dimension": dimension,
+#         "delta": delta,
+#         "from": old_value,
+#         "to": new_value,
+#         "reason": reason,
+#     })
+#
+#     await user_manager.save_user(profile)
+#
+#     return (
+#         f"已更新 {profile.nickname} 的{conf['label']}\n"
+#         f"- 变化：{old_value:.1f} → {new_value:.1f} ({delta:+.1f})\n"
+#         f"- 原因：{reason}"
+#     )
 
 
 @register()

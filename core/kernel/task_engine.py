@@ -747,7 +747,7 @@ class TaskEngine:
             if index > 0: await asyncio.sleep(random.uniform(0.1, 1.0))
 
             # 动态坐标解析
-            target_source = EventSource(platform="internal")
+            target_source = EventSource(platform="system")
 
             try:
                 # 严格校验并解析 session_id (例如: private_onebot:12345)

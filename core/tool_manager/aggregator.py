@@ -74,7 +74,7 @@ class ToolManager:
         for root, _, files in os.walk(self.tools_dir):
             for file in files:
                 if file.endswith(".py") and not file.startswith("__"):
-                    module_name = file[:-3] # 去除 .py 后缀
+                    module_name = file[:-3]  # 去除 .py 后缀
 
                     # 1. 构造配置键名 (例如: tools.System1.core_tool)
                     config_key = f"tools.{system_name}.{module_name}"
@@ -148,11 +148,9 @@ class ToolManager:
                     self.config.set(config_key, True)
                     is_enabled = True
                     config_changed = True
-                    logger.info(f"✨ 发现新工具文件 [{system_name}/{module_short_name}]，已自动注册并默认启用。")
 
                 # 2. 如果配置为 false，直接阻断物理导入
                 if not is_enabled:
-                    logger.info(f"🚫 工具文件 [{system_name}/{module_short_name}] 已被禁用，跳过主动加载。")
                     continue
 
                 # 3. 允许加载
@@ -169,11 +167,16 @@ class ToolManager:
 
         # 获取所有通过 @register 注册的函数
         pending = get_pending_functions()
+        expected_prefix = self.tools_dir.replace('/', '.')
 
         for func, name in pending:
             tool_name = name or func.__name__
 
             module_path = getattr(func, "__module__", "")
+
+            if module_path and not (module_path.startswith(expected_prefix + ".") or module_path == expected_prefix):
+                continue
+
             if module_path.startswith("tools."):
                 parts = module_path.split('.')
                 if len(parts) >= 3:
@@ -226,6 +229,11 @@ class ToolManager:
             pending = get_pending_functions()
             mounted_count = 0
             for func, name in pending:
+                module_path = getattr(func, "__module__", "")
+
+                if module_path != module_name:
+                    continue
+
                 tool_name = name or func.__name__
                 schema = SchemaGenerator.get_function_schema(func, tool_name)
 
@@ -313,11 +321,13 @@ class ToolManager:
                 error_lower = error_msg.lower()
 
                 # A. 瞬态错误 - 指数退避静默重试
-                is_transient = any(k in error_lower for k in ["timeout", "connection", "502", "503", "rate limit", "too many requests"])
+                is_transient = any(k in error_lower for k in
+                                   ["timeout", "connection", "502", "503", "rate limit", "too many requests"])
                 if is_transient:
                     if attempt < max_retries - 1:
                         delay = base_delay * (2 ** attempt)
-                        logger.warning(f"🌐 瞬态网络错误 [{name}] ({error_msg})，{delay}s 后进行第 {attempt+1} 次重试...")
+                        logger.warning(
+                            f"🌐 瞬态网络错误 [{name}] ({error_msg})，{delay}s 后进行第 {attempt + 1} 次重试...")
                         await asyncio.sleep(delay)
                         continue
                     else:
@@ -326,14 +336,16 @@ class ToolManager:
                         return f"【Terminal Error】网络或服务持续不可用。错误详情：{error_msg}。请暂时放弃使用此工具。"
 
                 # B. 终端错误 (Terminal Error) - 直接拦截
-                is_terminal = any(k in error_lower for k in ["permission denied", "unauthorized", "401", "403", "not found"])
+                is_terminal = any(
+                    k in error_lower for k in ["permission denied", "unauthorized", "401", "403", "not found"])
                 if is_terminal:
                     self._last_failed_signature = current_signature
                     return f"【Terminal Error】权限被拒绝或目标不存在。错误详情：{error_msg}。请改变计划。"
 
                 # C. 语义错误 (Semantic Error) - 触发自愈
                 self._last_failed_signature = current_signature
-                should_heal = any(k in error_lower for k in ["argument", "missing", "type", "value", "json", "format", "invalid"])
+                should_heal = any(
+                    k in error_lower for k in ["argument", "missing", "type", "value", "json", "format", "invalid"])
 
                 if allow_self_heal and self.max_self_heal_attempts > 0 and should_heal:
                     logger.info(f"🩹 触发参数级自愈回路: {name}")

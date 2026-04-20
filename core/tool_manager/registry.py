@@ -1,24 +1,28 @@
-from typing import Callable, List, Tuple
+# core/tool_manager/registry.py
+from typing import Callable, List, Tuple, Dict
 
-_PENDING_FUNCTIONS: List[Tuple[Callable, str]] = []
+_REGISTERED_FUNCTIONS: Dict[str, Tuple[Callable, str]] = {}
 
 
 def register(name: str = None):
     """
-    具注册装饰器
+    工具注册装饰器
     """
 
     def decorator(func: Callable):
-        _PENDING_FUNCTIONS.append((func, name))
+        mod = getattr(func, "__module__", "unknown")
+        key = f"{mod}.{func.__name__}"
+        _REGISTERED_FUNCTIONS[key] = (func, name)
         return func
 
     return decorator
 
 
 def get_pending_functions() -> List[Tuple[Callable, str]]:
-    """获取所有已注册但未加载的函数"""
-    return _PENDING_FUNCTIONS.copy()
+    """获取所有已注册的函数"""
+    return list(_REGISTERED_FUNCTIONS.values())
 
 
 def clear_pending():
-    _PENDING_FUNCTIONS.clear()
+    # 废弃清空操作，让字典始终保持全量状态
+    pass

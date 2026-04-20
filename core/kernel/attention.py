@@ -64,9 +64,10 @@ class AttentionFilter:
 
     async def evaluate(self, event: OneBotEvent,
                        recent_history: Optional[List[Dict]] = None,
-                       willingness: float = 0.5) -> ReactionType:
+                       willingness: float = 0.5) -> Tuple[ReactionType, str, float]:
         """
         注意力评估总线：结合硬规则、动态阈值与软规则(LLM)进行综合决策。
+        返回：(反应类型, 建议行动/态度, 意愿偏移量)
         """
         # ==========================================
         # 第一级漏斗：绝对本能反射 (Hard Rules)
@@ -75,11 +76,11 @@ class AttentionFilter:
         if hard_reaction:
             if hard_reaction in [ReactionType.REPLY, ReactionType.INTERJECT]:
                 self._update_inertia(event)
-            return hard_reaction
+            return hard_reaction, "系统级本能驱动的绝对反应", 0.0
 
         # 过了硬规则后，只有 MESSAGE 事件才值得继续分析
         if event.type != EventType.MESSAGE:
-            return ReactionType.IGNORE
+            return ReactionType.IGNORE, "非消息事件环境噪音，忽略", 0.0
 
         # ==========================================
         # 第二级漏斗：社交亲密度门控 (Social Gate)
@@ -88,7 +89,7 @@ class AttentionFilter:
         if social_reaction:
             if social_reaction in [ReactionType.REPLY, ReactionType.INTERJECT]:
                 self._update_inertia(event)
-            return social_reaction
+            return social_reaction, "触发社交门控机制", 0.0
 
         # ==========================================
         # 第三级漏斗：边缘系统驱动的动态评估 (LLM Soft Rules)
@@ -103,15 +104,16 @@ class AttentionFilter:
         is_private = getattr(event, "detail_type", "") in [DetailType.PRIVATE, "private"]
 
         if threshold >= 0.85 and not (is_mentioned or is_named or is_private):
-            logger.info(f"🛑 [Attention Cutoff] 算力截断：当前意愿枯竭 ({willingness:.2f}) 且未被呼叫，拒绝投入算力，强制潜水。")
-            return ReactionType.IGNORE  # 直接抛弃，不进大脑
+            logger.info(f"🛑 [Attention Cutoff] 算力截断：当前意愿枯竭 ({willingness:.2f}) 且未被呼叫，强制潜水。")
+            return ReactionType.IGNORE, "意愿枯竭，强制休眠", 0.0
 
-        soft_reaction = await self._check_soft_rules(event, threshold, state_desc, recent_history)
+        soft_reaction, should_do, will_shift = await self._check_soft_rules(event, threshold, state_desc,
+                                                                            recent_history)
 
         if soft_reaction in [ReactionType.REPLY, ReactionType.INTERJECT]:
             self._update_inertia(event)
 
-        return soft_reaction
+        return soft_reaction, should_do, will_shift
 
     def _check_hard_rules(self, event: OneBotEvent) -> Optional[ReactionType]:
         """
@@ -240,7 +242,7 @@ class AttentionFilter:
         return threshold, ",".join(factors)
 
     async def _check_soft_rules(self, event: OneBotEvent, threshold: float, state_desc: str,
-                                recent_history: Optional[List[Dict]] = None) -> ReactionType:
+                                recent_history: Optional[List[Dict]] = None) -> Tuple[ReactionType, str, float]:
         """
         第三级漏斗：LLM 高维认知评估。
         整合动态阈值与环境压迫力，决定最终的交互意愿。
@@ -295,10 +297,11 @@ class AttentionFilter:
 - IGNORE: 噪音 / 无意义
 ———
 【决策直觉】
-你只需回答3个隐含问题：
+你只需回答4个隐含问题：
 1. 这是否与我有关？
 2. 我现在有没有动力参与？（受阻力影响）
 3. 是否存在必须处理或强吸引点？
+4. 该事件对我当前的继续交流意愿产生了怎样的微弱影响？
 ———
 【重要倾向】
 - 阻力高 → 更倾向 OBSERVE / SILENT_OBSERVE / IGNORE
@@ -324,7 +327,11 @@ class AttentionFilter:
                         },
                         "should_do": {
                             "type": "string",
-                            "description": "现在应该要做什么？"
+                            "description": "根据当前判断，建议下一步采取的具体行动或态度"
+                        },
+                        "willingness_shift": {
+                            "type": "number",
+                            "description": "对话意愿的微调值（极其克制，范围 -0.1 到 0.1）。无感为0.0，厌烦为负，吸引为正。"
                         },
                         "confidence": {
                             "type": "number",
@@ -333,7 +340,7 @@ class AttentionFilter:
                             "description": "对该决策的确信度"
                         }
                     },
-                    "required": ["think", "decision", "should_do", "confidence"],
+                    "required": ["think", "decision", "should_do", "willingness_shift", "confidence"],
                     "additionalProperties": False
                 }
             )
@@ -344,29 +351,31 @@ class AttentionFilter:
                 try:
                     result = json.loads(result)
                 except:
-                    return ReactionType.OBSERVE
+                    return ReactionType.OBSERVE, "注意力系统降级容错", 0.0
 
             decision = result.get("decision", "OBSERVE")
             confidence = float(result.get("confidence", 0.0))
-            should_do = result.get("should_do", "")
+            should_do = result.get("should_do", "暂无特别建议")
+            will_shift = float(result.get("willingness_shift", 0.0))
             think = result.get("think", "")
 
             logger.info(
-                f"🧠 [Attention Eval] 置信度: {confidence:.2f} | 阻力: {threshold:.2f} | 决策: {decision} ({should_do})\n{think}")
+                f"🧠 [Attention Eval] 置信度: {confidence:.2f} | 阻力: {threshold:.2f} | 决策: {decision} ({should_do}) | 意愿偏离: {will_shift:+.2f}\n{think}")
 
             # 强逻辑收束：防止模型出现置信度低于阈值却强行 REPLY 的幻觉
+            reaction = ReactionType(decision.lower())
             if decision in ["REPLY", "INTERJECT"] and confidence < threshold:
-                logger.warning(
-                    f"⚠️ [Attention] 模型决策倒挂，置信度({confidence})不足以击穿阻力({threshold})。强制降级为 SILENT_OBSERVE 或 OBSERVE。")
+                logger.warning(f"⚠️ [Attention] 置信度不足以击穿阻力。强制降级。")
                 if is_private or is_mentioned:
-                    return ReactionType.SILENT_OBSERVE
-                return ReactionType.OBSERVE
+                    reaction = ReactionType.SILENT_OBSERVE
+                else:
+                    reaction = ReactionType.OBSERVE
 
-            return ReactionType(decision.lower())
+            return reaction, should_do, will_shift
 
         except Exception as e:
             logger.error(f"Attention LLM check failed: {e}")
-            return ReactionType.OBSERVE
+            return ReactionType.OBSERVE, "注意力评估抛出异常", 0.0
 
     async def get_current_interest_text(self) -> str:
         """

@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from typing import List, Dict, Any, Optional, Awaitable, Callable
 
 import aiofiles
@@ -220,6 +221,8 @@ class AutonomousAgent:
         platform_name = getattr(event.source, "platform", "unknown")
         ctx_id = event.source.group_id if event.source.group_id else event.source.user_id
         session_id = f"{ctx_type}_{platform_name}:{ctx_id}"
+        event_puid = f"{platform_name}:{event.source.user_id}" if event.source.user_id else None
+        event.extra["event_puid"] = event_puid
 
         if event.detail_type == DetailType.CROSS_SESSION_DIRECTIVE:
             target_sid = event.extra.get("target_session_id")
@@ -275,23 +278,50 @@ class AutonomousAgent:
             images = event.extra.get("images", [])
 
             if images:
-                # 按照标准 Vision API 规范构建多模态 Content
-                content_payload = [{"type": "text", "text": text_content}]
+                # 多模态降维剥离：主体转为纯文本
+                content_payload = text_content
 
                 for img_source in images:
                     b64_data_uri = await encode_image_to_data_uri(img_source)
 
                     if b64_data_uri:
-                        content_payload.append({
-                            "type": "image_url",
-                            "image_url": {"url": b64_data_uri}
-                        })
+                        img_id = f"img_{uuid.uuid4().hex[:8]}"
+                        # 将图片 base64 写入 SQLite，同时清理 50 张以外的旧图片以控制 DB 体积
+                        async with self.database.get_connection() as conn:
+                            await conn.execute(
+                                "INSERT OR REPLACE INTO multimodal_cache (image_id, b64_data_uri, timestamp) VALUES (?, ?, ?)",
+                                (img_id, b64_data_uri, time.time())
+                            )
+                            # 数据库层面的 LRU 截断
+                            await conn.execute(
+                                "DELETE FROM multimodal_cache WHERE image_id NOT IN (SELECT image_id FROM multimodal_cache ORDER BY timestamp DESC LIMIT 50)"
+                            )
+                            await conn.commit()
+
+                        # 视神经解析
+                        try:
+                            logger.info(f"👁️ 正在对图像 [{img_id}] 进行解析...")
+                            initial_prompt = "你是一个前置视神经模块。描述这张图的内容特征。"
+
+                            resp = await self.api_client.create_chat_completion(
+                                messages=[{
+                                    "role": "user",
+                                    "content": [
+                                        {"type": "text", "text": initial_prompt},
+                                        {"type": "image_url", "image_url": {"url": b64_data_uri}}
+                                    ]
+                                }],
+                                model=self.api_client.small_model
+                            )
+                            initial_desc = resp.get("content", "图片特征提取失败。")
+                        except Exception as e:
+                            logger.error(f"视神经初析崩溃: {e}")
+                            initial_desc = f"视觉组件离线: {e}"
+
+                        # 认知映射：用文字锚点替代真实图片
+                        content_payload += f"\n\n[图片附件 ID: {img_id}] 系统初析特征: {initial_desc}\n(系统提示: 上述为低精度摘要。如果需要更详细的信息，你必须主动调用 `reparse_image` 工具提取。)"
                     else:
-                        # 如果转码失败（如文件被删/网络超时），注入系统的容错提示，防止认知割裂
-                        content_payload.append({
-                            "type": "text",
-                            "text": "[系统警告：此位置的一张图片因获取失败已丢失，请告知用户图片加载失败。]"
-                        })
+                        content_payload += "\n[系统警告：此位置的一张图片因获取或转码失败已丢失。]"
             else:
                 # 兼容旧版纯文本
                 content_payload = text_content
@@ -309,7 +339,8 @@ class AutonomousAgent:
                 "type": event.type,
                 "ephemeral": is_ephemeral,
                 "raw_event_id": event.id,
-                "session_id": session_id
+                "session_id": session_id,
+                "puid": event_puid
             }
         }
         logger.info(f"Event Ingested: {event.type}.{event.detail_type} -> Routed to [{session_id}]")
@@ -374,12 +405,27 @@ class AutonomousAgent:
         current_will = self.session_willingness.get(session_id, 0.5)
         recent_history = active_history[:-1][-5:] if len(active_history) > 1 else []
 
-        reaction = await self.attention.evaluate(event,
-            recent_history=recent_history,
-            willingness=current_will
-        )
+        # 解包门控的三重参数
+        reaction_result = await self.attention.evaluate(event,
+                                                        recent_history=recent_history,
+                                                        willingness=current_will
+                                                        )
+
+        if isinstance(reaction_result, tuple) and len(reaction_result) == 3:
+            reaction, should_do, will_shift = reaction_result
+        else:
+            reaction = reaction_result
+            should_do = "暂无建议"
+            will_shift = 0.0
 
         self._current_reaction = reaction
+        self._current_should_do = should_do
+
+        # 将门控输出的意愿偏离量直接赋予会话状态
+        new_will = max(0.0, min(1.0, current_will + will_shift))
+        self.session_willingness[session_id] = new_will
+        if will_shift != 0.0:
+            logger.info(f"⚖️ [Attention Gate] 事件导致意愿偏离 {will_shift:+.2f} -> 当前意愿: {new_will:.2f}")
 
         # 从 Session 隔离池中安全读取当前意图
         current_goal = self.session_scratchpads.get(session_id, {}).get("current_goal")
@@ -566,6 +612,23 @@ class AutonomousAgent:
         logger.info("正在加载边缘系统...")
         await self.limbic.initialize()
 
+        logger.info("正在加载多模态视觉缓冲层...")
+        async with self.database.get_connection() as conn:
+            await conn.execute("""
+                               CREATE TABLE IF NOT EXISTS multimodal_cache
+                               (
+                                   image_id
+                                   TEXT
+                                   PRIMARY
+                                   KEY,
+                                   b64_data_uri
+                                   TEXT,
+                                   timestamp
+                                   REAL
+                               )
+                               """)
+            await conn.commit()
+
         # 1. 注入初始系统上下文
         logger.info("正在加载兴趣...")
         initial_interest = await self.attention.get_current_interest_text()
@@ -700,6 +763,27 @@ class AutonomousAgent:
 
                 # --- B. 思考与决策阶段 (Thought) ---
                 current_session = getattr(self, "active_session_id", "system_default")
+                current_event_puid = event.extra.get("event_puid") if event else None
+
+                if current_event_puid:
+                    # 检查此 PUID 是否有档案，如果没有，直接静默建立（不再依赖 LLM 调用工具）
+                    profile = await self.user_manager.get_user(current_event_puid)
+                    if not profile:
+                        logger.info(f"👤 [Social Auto-Reg] 发现新用户 {current_event_puid}，正在初始化社交档案...")
+                        from core.social.schema import UserProfile
+                        plat, raw_uid = current_event_puid.split(':', 1) if ':' in current_event_puid \
+                            else ("unknown", current_event_puid)
+                        new_profile = UserProfile(
+                            puid=current_event_puid,
+                            platform=plat,
+                            user_id=raw_uid,
+                            nickname=f"User_{raw_uid[:4]}(临时昵称，需要立刻修改)",
+                            intimacy=0.0,
+                            favorability=0.0,
+                            trust=10.0,
+                            impression="一个新面孔。"
+                        )
+                        await self.user_manager.save_user(new_profile)
 
                 # 建立并获取 Session 独占工作区与状态板
                 if current_session not in self.working_memory:
@@ -745,11 +829,10 @@ class AutonomousAgent:
                             break
 
                 # 提取当前主目标与群环境
-                active_puid = current_scratchpad.get("active_puid")
-                target_profile = await self.user_manager.get_user(active_puid) if active_puid else None
+                target_profile = await self.user_manager.get_user(current_event_puid) if current_event_puid else None
 
                 # L1.5 跨会话瞬时记忆捕获
-                cross_session_echoes = self._get_fresh_cross_session_echoes(current_session, active_puid)
+                cross_session_echoes = self._get_fresh_cross_session_echoes(current_session, current_event_puid)
 
                 group_familiarity = 0
                 is_group = current_session.startswith("group_")
@@ -803,9 +886,9 @@ class AutonomousAgent:
                     else:
                         relational_subtext += "【情感内核】：你对此人充满戒备。语气冰冷，尽可能敷衍，甚至在 inner_monologue 中表达反感。"
                 else:
-                    if active_puid:
+                    if current_event_puid:
                         relational_subtext += (
-                            f"【目光焦点】：这是一个你脑海中没有任何记录的全新陌生人 (PUID: {active_puid})。\n"
+                            f"【目光焦点】：这是一个你脑海中没有任何记录的全新陌生人 (PUID: {current_event_puid})。\n"
                             f"【情感内核】：这是你们的初次交互。由于对方不在记忆库中，请保持基础的礼貌与极高的戒备心。\n"
                             f"【社交捕获指令】：如果对方的发言不是纯粹的噪音，你必须调用 `social_record_user` 工具为该 PUID 建立初始档案。\n"
                         )
@@ -828,7 +911,7 @@ class AutonomousAgent:
                 last_obs = self.session_last_observations.get(current_session, "")
 
                 # 仅当用户发了有实质意义的话，且黑板上有数据时进行碰撞测试
-                if active_puid and last_obs and len(last_obs) > 2:
+                if current_event_puid and last_obs and len(last_obs) > 2:
                     for sid, topic_data in self.global_blackboard.items():
                         # 不自己撞自己，且话题不能超过 1 小时 (3600秒)
                         if sid == current_session or (time.time() - topic_data.get("timestamp", 0) > 3600):
@@ -839,7 +922,7 @@ class AutonomousAgent:
                         if hit_keywords:
                             participants = topic_data.get("participants", [])
                             # 权限隔离分流
-                            if active_puid in participants:
+                            if current_event_puid in participants:
                                 # 场景A：他本身就是那个群的参与者，只是跑来私聊继续说
                                 blackboard_echo += f"\n<Blackboard_Echo>\n【语境同步】：该用户刚刚在隔壁 [{sid}] 参与了该话题：{topic_data['summary']}\n你可以直接顺着那个话题往下聊。\n</Blackboard_Echo>\n"
                             else:
@@ -855,7 +938,7 @@ class AutonomousAgent:
 
                 # 动态穿透获取当前会话目标
                 retrieved_memories = await self._active_retrieval(
-                    active_puid, last_obs, current_scratchpad.get("current_goal", ""))
+                    current_event_puid, last_obs, current_scratchpad.get("current_goal", ""))
 
                 # 组装最终 System Prompt
                 system_prompt_base = self.prompt_manager.get_system_prompt(
@@ -892,19 +975,21 @@ class AutonomousAgent:
                     final_system_prompt += f"\n\n后台任务：\n{bg_tasks_xml}"
 
                 if getattr(self, "_current_reaction", None) and self._current_reaction.value == "silent_observe":
+                    should_do_hint = getattr(self, "_current_should_do", "保持沉默")
                     final_system_prompt += (
                         f"\n\n<Subconscious_Override>\n"
                         f"你的边缘系统刚刚决定对当前的对话【保持静默（已读不回）】。\n"
-                        f"这可能是因为你极其疲惫，或者判定当前话题毫无价值。\n"
+                        f"门控系统给你的建议：{should_do_hint}\n"
                         f"【最高指令】：本次决策中绝对禁止回复这条消息\n"
-                        f"你必须且只能：在 `inner_monologue` 中真实表达你的烦躁或不屑，并将 `action` 设置为 `ignore`（代表行为上保持沉默）。\n"
+                        f"你必须且只能：在 `inner_monologue` 中真实表达你的烦躁或不屑，并将 `action` 设置为 `ignore`。\n"
                         f"</Subconscious_Override>"
                     )
                 elif getattr(self, "_current_reaction", None):
+                    should_do_hint = getattr(self, "_current_should_do", "无特别建议")
                     final_system_prompt += (
                         f"\n\n<Subconscious_Hint>\n"
-                        f"注意力系统给你的行动建议是：【{self._current_reaction.value}】。\n"
-                        f"如果是主动插话，请用随性、自然的口吻切入；如果是被直接提及，请正面回应。\n"
+                        f"注意力系统给你的行动建议是：【{should_do_hint}】。\n"
+                        f"请根据以上建议自然地进行思考和切入对话。\n"
                         f"</Subconscious_Hint>"
                     )
 
@@ -917,8 +1002,13 @@ class AutonomousAgent:
 
                 # 调试日志落盘
                 try:
-                    async with aiofiles.open(f"data/s1_debug/messages_{current_session.replace(':', '_')}.json", "w", encoding="utf-8") as f:
+                    async with aiofiles.open(f"data/s1_debug/messages_{current_session.replace(':', '_')}.json",
+                                             "w", encoding="utf-8") as f:
                         await f.write(json.dumps(active_history, ensure_ascii=False, indent=4))
+
+                    async with aiofiles.open(f"data/s1_debug/prompt_{current_session.replace(':', '_')}.txt",
+                                             "w", encoding="utf-8") as f:
+                        await f.write(final_system_prompt)
                 except Exception as e:
                     logger.warning(f"Failed to write debug logs: {e}")
 
@@ -983,6 +1073,46 @@ class AutonomousAgent:
                         if new_focus != current_focus and new_focus.strip():
                             await self.attention.update_interest(new_focus)
                             logger.info(f"🎯 [Cognitive Shift] 认知焦点已转移至: {new_focus}")
+
+                    social_str = monologue.get("social_perception", "")
+                    if current_event_puid and isinstance(social_str, str) and social_str.strip():
+                        deltas = {"favorability": 0.0, "trust": 0.0, "intimacy": 0.0}
+                        has_changes = False
+
+                        # 按逗号分割切片，防范 LLM 乱加空格
+                        for item in social_str.split(","):
+                            parts = item.split(":")
+                            if len(parts) == 2:
+                                key = parts[0].strip().lower()
+                                if key in deltas:
+                                    try:
+                                        # 过滤掉可能存在的残余字符，强制转换为 float
+                                        val_str = parts[1].strip()
+                                        val = float(val_str)
+
+                                        # 为了防止模型暴走，在底层对单次 delta 进行物理收束，最大变动绝对值不超过 5.0
+                                        deltas[key] = max(-5.0, min(5.0, val))
+
+                                        if deltas[key] != 0.0:
+                                            has_changes = True
+                                    except ValueError:
+                                        logger.warning(
+                                            f"⚠️ [Social Sync] 解析社交感知字符串出现脏数据: '{item}'，已忽略。")
+
+                        if has_changes:
+                            async def _update_social_profile(puid=current_event_puid, d=deltas):
+                                profile = await self.user_manager.get_user(puid)
+                                if profile:
+                                    profile.favorability = max(-100.0,
+                                                               min(100.0, profile.favorability + d["favorability"]))
+                                    profile.trust = max(0.0, min(100.0, profile.trust + d["trust"]))
+                                    profile.intimacy = max(0.0, min(100.0, profile.intimacy + d["intimacy"]))
+                                    await self.user_manager.save_user(profile)
+                                    logger.info(
+                                        f"👥 [Social Sync] 实体 {puid} 档案潜意识更新: 好感 {d['favorability']:+.1f}, 信任 {d['trust']:+.1f}, 亲密 {d['intimacy']:+.1f}")
+
+                            # 压入后台异步执行，绝不阻塞主脑心流
+                            asyncio.create_task(_update_social_profile())
 
                     # --- L1.2 热点黑板上链 ---
                     atmosphere = monologue.get("room_atmosphere", {})
@@ -1394,15 +1524,19 @@ class AutonomousAgent:
                         },
                         "willingness_shift": {
                             "type": "number",
-                            "description": "基于本次交互，你对该会话(群/人)的交流意愿变化。极度无聊/厌烦/疲惫输入 -0.2，觉得有趣/想继续聊输入 +0.2，无感为 0.0。"
+                            "description": "基于本次交互，你对该会话(群/人)的交流意愿变化。通常在 -0.2 到 +0.2 之间，切忌大起大落，无感为 0.0。"
                         },
                         "cognitive_focus": {
                             "type": "string",
                             "description": "用极其简短的词组（如：'Minecraft代码重构', '摸鱼闲聊'）总结你此刻大脑中最痴迷、最想聊的全局话题。如果遇到更吸引你的事物，请果断转移焦点。"
                         },
+                        "social_perception": {
+                            "type": "string",
+                            "description": "对当前交互者的社交关系微调。必须严格使用 'key:delta' 逗号分隔格式，绝不许包含任何解释性文字！支持键：favorability, trust, intimacy。示例：'favorability:+1.0, trust:-0.5, intimacy:+0.2'。若无对象或无变化，必须返回空字符串。"
+                        },
                         "room_atmosphere": {
                             "type": "object",
-                            "description": "对当前房间正在热议的话题进行客观总结（用于跨群记忆同步）。如果没人说话或话题极度分散，可留空。",
+                            "description": "对当前房间正在热议的话题进行客观总结。如果没人说话或话题极度分散，可留空。",
                             "properties": {
                                 "keywords": {
                                     "type": "array",
@@ -1419,7 +1553,7 @@ class AutonomousAgent:
                         }
                     },
                     "required": ["emotion_check", "planning", "willingness_shift", "cognitive_focus",
-                                 "room_atmosphere"],
+                                 "social_perception", "room_atmosphere"],
                     "additionalProperties": False
                 },
                 "tasks": {

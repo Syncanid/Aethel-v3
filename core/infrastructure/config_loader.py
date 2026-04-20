@@ -102,18 +102,6 @@ class Config:
         将内存中的配置脏数据原子化地覆写回磁盘。
         """
         try:
-            # 提取所有顶层根节点
-            root_keys = list(self._config.keys())
-
-            for i, key in enumerate(root_keys):
-                # 跳过第一个节点，从第二个节点开始处理
-                if i > 0:
-                    # 获取该节点现有的注释信息
-                    # ca (comment attribute) 存储了节点前后的所有词法信息
-                    # 这里的 '\n' 会被 ruamel 处理为物理上的空行
-                    # 如果该节点之前已经有注释，它会将空行插入在注释之上
-                    self._config.yaml_set_comment_before_after_key(key, before='\n')
-
             with open(self._config_path, "w", encoding="utf-8") as f:
                 self._yaml_engine.dump(self._config, f)
             logger.info(f"🔧 配置已安全落盘至 {self._config_path}")

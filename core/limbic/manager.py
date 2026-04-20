@@ -188,7 +188,7 @@ class LimbicManager:
                 event = OneBotEvent(
                     type=EventType.NOTICE,
                     detail_type=DetailType.INTERNAL_DRIVE,
-                    source=EventSource(platform="internal_limbic"),
+                    source=EventSource(platform="system"),
                     extra={
                         "target_category": result.get("target_category", "任何人"),
                         "narrative": result.get("impulse_narrative", "产生了一股不可名状的冲动。")
