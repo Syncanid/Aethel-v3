@@ -9,6 +9,7 @@ from typing import Dict, Any, Optional
 
 import asyncssh
 
+from core.infrastructure.config_loader import get_config
 from core.kernel.task_engine import TaskEngine
 from core.tool_manager.output_cache import ToolOutputCache
 from core.tool_manager.registry import register
@@ -21,7 +22,7 @@ DELIMITER_PREFIX = "[===AETHEL_CMD_DONE:"
 DELIMITER_SUFFIX = "===]"
 
 # 为模型设定安全极限
-MAX_SAFE_TOKENS = 15000
+MAX_SAFE_TOKENS = get_config().get("llm.model_context", 16384) - 1000
 
 IS_WINDOWS = os.name == 'nt'
 

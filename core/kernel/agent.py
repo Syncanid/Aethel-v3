@@ -438,7 +438,7 @@ class AutonomousAgent:
 
         # 尝试从配置获取上下文限制
         TOKEN_LIMIT_APPROX = self.config.get("llm.model_context", 16384)
-        SAFE_LIMIT = TOKEN_LIMIT_APPROX - 200
+        SAFE_LIMIT = TOKEN_LIMIT_APPROX - 1000
 
         # 重新精准盘点当前 Session 的 Token
         current_estimated_tokens = sum(calculate_tokens(msg.get("content", "")) for msg in session_history)

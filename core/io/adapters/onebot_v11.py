@@ -160,6 +160,8 @@ class OneBotV11Adapter(BaseAdapter):
         alt_text = ""
         image_list = []
 
+        logger.debug(f"Received message: {raw_message}")
+
         # 如果是 list 格式 (OneBot v11 Array)
         if isinstance(raw_message, list):
             for seg in raw_message:
@@ -176,7 +178,7 @@ class OneBotV11Adapter(BaseAdapter):
                 elif t == "face":
                     alt_text += "[表情]"
                 elif t == "at":
-                    alt_text += f"@{d.get('qq', 'User')} "
+                    alt_text += f"[CQ:at,qq={d.get('qq', 'User')}]"
                 elif t == "json":
                     alt_text += "[卡片消息]"
                 else:

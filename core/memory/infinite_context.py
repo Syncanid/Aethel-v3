@@ -14,9 +14,9 @@ class InfiniteContextManager:
     def __init__(self, config: Config, api_client: GenericAPIClient):
         self.config = config
         self.api_client = api_client
-        # 从配置读取阈值，默认上下文窗口的 75% 触发压缩
+        # 从配置读取阈值
         self.max_tokens = self.config.get("llm.model_context", 16384)
-        self.trigger_threshold = self.max_tokens * 0.75
+        self.trigger_threshold = self.max_tokens * 0.8 - 2000
 
         # 压缩提示词
         self.compress_prompt = """

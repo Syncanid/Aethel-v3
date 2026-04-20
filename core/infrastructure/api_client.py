@@ -5,7 +5,6 @@ import logging
 from datetime import datetime
 from typing import Dict, Optional
 
-import aiofiles
 import httpx
 from openai import AsyncOpenAI
 
@@ -13,6 +12,26 @@ from core.infrastructure.config_loader import Config
 from core.utilities import get_log_filename
 
 logger = logging.getLogger(__name__)
+
+
+def disable_multimodal(messages: list) -> list:
+    sanitized = []
+    for msg in messages:
+        content = msg.get("content")
+
+        # 如果是多模态结构（list），只保留文本
+        if isinstance(content, list):
+            text_parts = [
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            ]
+            msg = msg.copy()
+            msg["content"] = "\n".join(text_parts)
+
+        sanitized.append(msg)
+
+    return sanitized
 
 
 class GenericAPIClient:
@@ -123,7 +142,8 @@ class GenericAPIClient:
         tool_choice_val = "auto"
 
         if self.use_prompt_tools and not self.use_schema_tools:
-            logger.warning("配置冲突: use_prompt_tools 必须在 use_schema_tool_calls 开启时才有效。已自动强制开启 Schema 工具模式。")
+            logger.warning(
+                "配置冲突: use_prompt_tools 必须在 use_schema_tool_calls 开启时才有效。已自动强制开启 Schema 工具模式。")
             self.use_schema_tools = True
 
         # 1. Prompt Tools 模式干预
@@ -199,6 +219,7 @@ class GenericAPIClient:
                 logger.error(f"异常的 messages 负载: {json.dumps(messages, ensure_ascii=False)}")
                 raise ValueError(error_msg)  # 直接抛出异常，触发 traceback 阻断运行
 
+        messages = disable_multimodal(messages)
         payload = {
             "model": model,
             "messages": messages

@@ -120,8 +120,9 @@ class AttentionFilter:
 
         logger.debug(f"Received event: {event.type}.{getattr(event, 'detail_type', 'unknown')}")
 
-        # 0. 系统后台强中断 (仅保留系统级任务挂起或唤醒指令)
+        # 0. 系统后台强中断
         target_details = [
+            DetailType.INTERNAL_DRIVE,
             DetailType.TASK_COMPLETE,
             "ask_system1_for_help",
             "wake_up",
@@ -266,44 +267,44 @@ class AttentionFilter:
             context_str = "\n".join(lines)
 
         prompt = f"""
-你是一个具备高度拟人化社会心智的 AI ({self.nickname}) 的潜意识网关（注意力门控）。
-请摒弃机械的条件判断规则，调用你的“社交直觉”和“意图穿透能力”。你的唯一任务是：基于生理状态、环境空气和对话的潜在意图，决定当前的【介入姿态】。
-
-【生理与微观环境】
-当前的行动阻力值: {threshold:.2f} (0.05~0.95。阻力越高，代表你越疲惫/越不想动)
-状态影响因子: [{state_desc}]
-你当前的认知兴趣点: "{await self.get_current_interest_text()}"
-
-【当前外部刺激】
-场景: {"私聊" if is_private else "群聊"} (你是否被明确@: {is_mentioned})
-消息发送者: {sender}
-社交语境: {"他人间的封闭对话（你目前是旁观者）" if is_reply_to_others else "开放话题 / 针对你的交互"}
-消息内容: "{content}"
-近期微观上下文:
+你是 AI ({self.nickname}) 的“注意力与社交决策门控”。
+你的任务是：基于当前状态与对话语境，做出一个符合人类直觉的“是否介入”判断。
+请用简短的内部推理（think）来帮助你稳定决策。
+———
+【你的状态】
+- 行动阻力: {threshold:.2f} （越高越不想参与）
+- 当前兴趣: "{await self.get_current_interest_text()}"
+- 状态影响: [{state_desc}]
+———
+【对话环境】
+- 场景: {"私聊" if is_private else "群聊"}
+- 是否被提及: {is_mentioned}
+- 社交语境: {"他人对话" if is_reply_to_others else "与你相关或开放"}
+- 发送者: {sender}
+———
+【消息内容】
+"{content}"
+【上下文】
 {context_str}
-
-【可用介入姿态的语义解析】(请根据社交直觉自由评估)
-- "REPLY" (开口回应): 顺滑的社交接续。对方在期待你的语言反馈，或是正常的对话抛接球。
-- "INTERJECT" (动作切入): 打破常规节奏。你察觉到必须立刻执行某项任务、处理具体的参数（如去某个ID/链接）、或遇到了极度契合兴趣的绝佳切入点。
-- "SILENT_OBSERVE" (积极静默): 察觉到指向你的交互，但因为极度疲惫、无聊或抗拒，主观决定“已读不回”。
-- "OBSERVE" (普通观察): 保持背景聆听。不属于你的话题，且没有引起你的兴趣。
-- "IGNORE" (纯粹噪音): 毫无价值的乱码或刷屏，直接在大脑中过滤。
-
-【推演与输出协议 (JSON)】
-你必须严格按照以下顺序进行思维推演和决策输出：
-
-1. `think`: (思维链) 在这里进行一段简短的内部推理。分析对方的隐性意图是什么？这句话是否包含需要处理的隐藏指令？当前环境是否适合介入？阻力值是否允许介入？
-2. `confidence`: (0.0~1.0) 评估你得出该决策的置信度。
-3. `decision`: 综合上述推演，在上述5种姿态中选择最符合人类社交直觉的一项。(置信度必须大于阻力值 {threshold:.2f} 才能输出 REPLY/INTERJECT)
-
-严格按照以下 JSON 格式输出：
-{{
-    "think": "首先，我处于...环境。这句话的表面意思是...，其实质意图/任务是...。结合当前的低阻力值，我应该...",
-    "reason": "简短的心理状态与动机分析",
-    "decision": "REPLY" | "INTERJECT" | "SILENT_OBSERVE" | "OBSERVE" | "IGNORE",
-    "confidence": 0.0 到 1.0 之间的浮点数
-}}
-"""
+———
+【行为语义】
+- REPLY: 自然回应，对方在等你
+- INTERJECT: 主动切入（任务 / 强兴趣 / 必须处理）
+- SILENT_OBSERVE: 与你相关，但不想回
+- OBSERVE: 与你无关，仅围观
+- IGNORE: 噪音 / 无意义
+———
+【决策直觉】
+你只需回答3个隐含问题：
+1. 这是否与我有关？
+2. 我现在有没有动力参与？（受阻力影响）
+3. 是否存在必须处理或强吸引点？
+———
+【重要倾向】
+- 阻力高 → 更倾向 OBSERVE / SILENT_OBSERVE / IGNORE
+- 被明确提及 → 提高 REPLY 概率
+- 存在明确任务/指令 → 倾向 INTERJECT
+- 他人对话 → 除非强相关，否则不要介入"""
         try:
             response = await self.api_client.create_chat_completion_once(
                 messages=prompt,
@@ -312,12 +313,27 @@ class AttentionFilter:
                 schema={
                     "type": "object",
                     "properties": {
-                        "think": {"type": "string"},
-                        "reason": {"type": "string"},
-                        "decision": {"type": "string", "enum": ["REPLY", "INTERJECT", "SILENT_OBSERVE", "OBSERVE", "IGNORE"]},
-                        "confidence": {"type": "number"}
+                        "think": {
+                            "type": "string",
+                            "description": "简短内部推理：包含意图判断、是否与自己相关、是否值得介入，以及一句话总结行为动机"
+                        },
+                        "decision": {
+                            "type": "string",
+                            "enum": ["REPLY", "INTERJECT", "SILENT_OBSERVE", "OBSERVE", "IGNORE"],
+                            "description": "最终选择的社交介入姿态"
+                        },
+                        "should_do": {
+                            "type": "string",
+                            "description": "现在应该要做什么？"
+                        },
+                        "confidence": {
+                            "type": "number",
+                            "minimum": 0.0,
+                            "maximum": 1.0,
+                            "description": "对该决策的确信度"
+                        }
                     },
-                    "required": ["decision", "reason", "confidence"],
+                    "required": ["think", "decision", "should_do", "confidence"],
                     "additionalProperties": False
                 }
             )
@@ -332,13 +348,16 @@ class AttentionFilter:
 
             decision = result.get("decision", "OBSERVE")
             confidence = float(result.get("confidence", 0.0))
-            reason = result.get("reason", "无明确原因")
+            should_do = result.get("should_do", "")
+            think = result.get("think", "")
 
-            logger.info(f"🧠 [Attention Eval] 置信度: {confidence:.2f} | 阻力: {threshold:.2f} | 决策: {decision} ({reason})")
+            logger.info(
+                f"🧠 [Attention Eval] 置信度: {confidence:.2f} | 阻力: {threshold:.2f} | 决策: {decision} ({should_do})\n{think}")
 
             # 强逻辑收束：防止模型出现置信度低于阈值却强行 REPLY 的幻觉
             if decision in ["REPLY", "INTERJECT"] and confidence < threshold:
-                logger.warning(f"⚠️ [Attention] 模型决策倒挂，置信度({confidence})不足以击穿阻力({threshold})。强制降级为 SILENT_OBSERVE 或 OBSERVE。")
+                logger.warning(
+                    f"⚠️ [Attention] 模型决策倒挂，置信度({confidence})不足以击穿阻力({threshold})。强制降级为 SILENT_OBSERVE 或 OBSERVE。")
                 if is_private or is_mentioned:
                     return ReactionType.SILENT_OBSERVE
                 return ReactionType.OBSERVE
@@ -382,7 +401,7 @@ class AttentionFilter:
         """获取兴趣向量 (带缓存)"""
         # 缓存有效性检查
         current_time = time.time()
-        if self._cached_interest_vector and (current_time - self._last_interest_update < 300): # 300秒TTL
+        if self._cached_interest_vector and (current_time - self._last_interest_update < 300):  # 300秒TTL
             return self._cached_interest_vector
 
         # 查库

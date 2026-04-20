@@ -122,7 +122,7 @@ class TaskEngine:
     def _prune_context(self, history: list):
         """[应急防爆] 强制上下文修剪"""
         TOKEN_LIMIT_APPROX = self.config.get("llm.model_context", 16384)
-        SAFE_LIMIT = TOKEN_LIMIT_APPROX - 200
+        SAFE_LIMIT = TOKEN_LIMIT_APPROX - 1000
 
         current_tokens = sum(calculate_tokens(msg.get("content", "")) for msg in history)
 
