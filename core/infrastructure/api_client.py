@@ -219,7 +219,7 @@ class GenericAPIClient:
                 logger.error(f"异常的 messages 负载: {json.dumps(messages, ensure_ascii=False)}")
                 raise ValueError(error_msg)  # 直接抛出异常，触发 traceback 阻断运行
 
-        messages = disable_multimodal(messages)
+        # messages = disable_multimodal(messages)
         payload = {
             "model": model,
             "messages": messages
