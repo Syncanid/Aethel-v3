@@ -42,7 +42,6 @@ class GenericAPIClient:
         self.model = config.get("llm.model_name")
         self.small_model = config.get("llm.small_model", self.model)
         self.embedding_model = config.get("llm.embedding_model_name")
-        self.enable_reasoning = config.get("llm.enable_reasoning", False)
         self.use_prompt_tools = self.config.get("llm.use_prompt_tools", False)
         self.use_schema_tools = self.config.get("llm.use_schema_tool_calls", True)
         self.arg_mode = self.config.get("llm.tool_call_arg_mode", "object")
@@ -224,11 +223,6 @@ class GenericAPIClient:
             "model": model,
             "messages": messages
         }
-
-        if self.enable_reasoning is not None:
-            payload["extra_body"] = {
-                "chat_template_kwargs": {"enable_thinking": self.enable_reasoning}
-            }
 
         if tools:
             payload["tools"] = tools

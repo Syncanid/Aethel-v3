@@ -2,7 +2,7 @@ system:
   log_level: "INFO"
 
   # 是否启用硬件资源绑定 (CPU/内存/磁盘影响情绪)
-  limbic_embodiment: true
+  limbic_embodiment: false
 
   # IO 连接设置 (预留)
   onebot_url: "ws://127.0.0.1:3001"
@@ -23,18 +23,14 @@ llm:
   small_model: "gpt-4o-mini"
   model_context: 32767
 
-  # 推理/思考模式开关
-  enable_reasoning: false
-
   # 工具调用策略配置
-
   # 设为 true 时，api_client 将截断原生的 tools 传参，
   # 并将工具定义压缩为强类型伪代码注入到 System Prompt 头部。
-  use_prompt_tools: false
+  use_prompt_tools: true
 
   # true: 在返回的 JSON content 中检测 tool_calls 字段
   # false: 使用 API 原生的 tool_calls 字段返回
-  use_schema_tool_calls: false
+  use_schema_tool_calls: true
   # Schema 中 arguments 的类型，use_schema_tool_calls 为 false 时无效。
   # object: 要求模型直接输出 JSON 对象 ({"arg": "val"})
   # string: 要求模型输出序列化的 JSON 字符串 ("{\"arg\": \"val\"}")
@@ -51,7 +47,7 @@ proxy:
   https: ""
 
 mcp_servers:
-# MCP 服务器配置示例 (后续阶段使用)
+# MCP 服务器配置示例
 # filesystem:
 #   command: "npx"
 #   args: ["-y", "@modelcontextprotocol/server-filesystem", "./data"]
